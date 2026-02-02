@@ -1,0 +1,109 @@
+# visualpath GPU Dockerfile
+# CUDA-enabled image for GPU-accelerated extractors
+#
+# Build: docker build -f docker/Dockerfile.gpu -t visualpath:gpu .
+# Run:   docker run --rm --gpus all visualpath:gpu version
+
+# =============================================================================
+# Stage 1: Builder
+# =============================================================================
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04 AS builder
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-dev \
+    python3.11-venv \
+    python3-pip \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Upgrade pip
+RUN python -m pip install --upgrade pip
+
+WORKDIR /build
+
+# Copy source
+COPY . /build/visualpath/
+
+WORKDIR /build/visualpath
+
+# Create wheels for dependencies
+RUN pip wheel --no-cache-dir -w /wheels \
+    pyyaml>=6.0 \
+    pydantic>=2.0 \
+    pyzmq>=25.0.0 \
+    numpy>=1.24.0 \
+    opencv-python>=4.5.0
+
+# Build visualpath wheel
+RUN pip wheel --no-cache-dir -w /wheels --no-deps .
+
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04 AS runtime
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3-pip \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash visualpath
+
+# Copy wheels from builder
+COPY --from=builder /wheels /wheels
+
+# Install packages
+RUN pip install --no-cache-dir --no-index --find-links=/wheels \
+    pyyaml pydantic pyzmq numpy opencv-python \
+    && rm -rf /wheels
+
+# Install visualpath
+COPY --from=builder /wheels/visualpath*.whl /tmp/
+RUN pip install --no-cache-dir --no-deps /tmp/visualpath*.whl || true \
+    && rm -f /tmp/*.whl
+
+# CUDA environment
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# Working directory
+WORKDIR /app
+
+# Switch to non-root user
+USER visualpath
+
+# Config volume
+ENV VISUALPATH_CONFIG_DIR=/config
+VOLUME ["/config"]
+
+# Entrypoint
+ENTRYPOINT ["visualpath"]
+CMD ["--help"]
+
+# Labels
+LABEL org.opencontainers.image.title="visualpath-gpu"
+LABEL org.opencontainers.image.description="Video analysis pipeline platform (GPU)"

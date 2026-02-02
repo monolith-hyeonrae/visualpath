@@ -1,0 +1,136 @@
+# Distributed multi-worker pipeline configuration
+#
+# This example shows a production-like setup with:
+# - Multiple extractors with different isolation levels
+# - GPU-accelerated face extraction in a separate venv
+# - CPU-based quality analysis in a separate process
+# - Full observability with file logging
+#
+# Environment variables:
+#   FACE_VENV   - Path to face extractor venv (default: /opt/venvs/face)
+#   LOG_DIR     - Log directory (default: ./logs)
+#   CUDA_DEVICE - CUDA device for GPU workers (default: cuda:0)
+#
+# Usage:
+#   visualpath validate -c examples/configs/distributed.yaml --check-plugins
+#   visualpath run -c examples/configs/distributed.yaml --dry-run
+
+version: "1.0"
+
+# Global settings applied to all pipelines
+globals:
+  default_isolation: process
+  observability_level: normal
+
+pipelines:
+  # ==========================================================================
+  # Main face analysis pipeline
+  # ==========================================================================
+  face_analysis:
+    extractors:
+      # Face detection - runs in isolated venv with GPU
+      - name: face
+        isolation: venv
+        venv_path: "${FACE_VENV:-/opt/venvs/face}"
+        config:
+          device: "${CUDA_DEVICE:-cuda:0}"
+          min_face_size: 50
+          confidence_threshold: 0.8
+
+      # Quality analysis - runs in separate process (CPU only)
+      - name: quality
+        isolation: process
+        config:
+          blur_threshold: 100.0
+          brightness_range: [30, 220]
+
+    fusion:
+      name: highlight
+      config:
+        # Trigger conditions
+        expression_threshold: 0.7
+        quality_threshold: 0.5
+
+        # Timing
+        cooldown_sec: 3.0
+        min_gate_open_sec: 0.5
+        max_gate_open_sec: 5.0
+
+        # Smoothing
+        smoothing_window_ms: 100
+
+    observability:
+      level: verbose
+      sinks:
+        - type: file
+          path: "${LOG_DIR:-./logs}/face_analysis.jsonl"
+          options:
+            rotate_size_mb: 100
+            max_files: 10
+
+  # ==========================================================================
+  # Lightweight motion detection pipeline
+  # ==========================================================================
+  motion_detection:
+    extractors:
+      # Motion detector - inline for low latency
+      - name: motion
+        isolation: inline
+        config:
+          sensitivity: 0.3
+          min_area_pct: 0.01
+
+    fusion:
+      name: motion_trigger
+      config:
+        consecutive_frames: 3
+        cooldown_sec: 1.0
+
+    observability:
+      level: minimal
+      sinks:
+        - type: file
+          path: "${LOG_DIR:-./logs}/motion.jsonl"
+
+  # ==========================================================================
+  # Full analysis pipeline (combines multiple extractors)
+  # ==========================================================================
+  full_analysis:
+    extractors:
+      - name: face
+        isolation: venv
+        venv_path: "${FACE_VENV:-/opt/venvs/face}"
+        config:
+          device: "${CUDA_DEVICE:-cuda:0}"
+
+      - name: pose
+        isolation: venv
+        venv_path: "${POSE_VENV:-/opt/venvs/pose}"
+        config:
+          device: "${CUDA_DEVICE:-cuda:0}"
+
+      - name: quality
+        isolation: process
+        config: {}
+
+      - name: motion
+        isolation: inline
+        config:
+          sensitivity: 0.2
+
+    fusion:
+      name: multi_signal
+      config:
+        weights:
+          face: 0.4
+          pose: 0.3
+          quality: 0.2
+          motion: 0.1
+        threshold: 0.6
+        cooldown_sec: 5.0
+
+    observability:
+      level: verbose
+      sinks:
+        - type: file
+          path: "${LOG_DIR:-./logs}/full_analysis.jsonl"

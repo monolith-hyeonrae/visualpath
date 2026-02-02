@@ -1,0 +1,76 @@
+[project]
+name = "visualpath"
+dynamic = ["version"]
+description = "Video analysis pipeline platform for plugin-based extractors"
+requires-python = ">=3.10"
+dependencies = [
+    "visualbase",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+# Development
+dev = [
+    "pytest>=7.0.0",
+]
+
+# YAML configuration support
+config = [
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+]
+
+# CLI tool (includes config dependencies)
+cli = [
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+]
+
+# IPC for distributed workers (VenvWorker, ProcessWorker)
+zmq = [
+    "pyzmq>=25.0.0",
+    "opencv-python>=4.5.0",  # For frame encoding/decoding
+]
+
+# All optional dependencies
+all = [
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "pyzmq>=25.0.0",
+    "opencv-python>=4.5.0",
+]
+
+[project.scripts]
+# Main CLI entry point
+visualpath = "visualpath.cli:main"
+# Worker subprocess entry point (used by VenvWorker)
+visualpath-worker = "visualpath.process.worker:main"
+
+[project.entry-points."visualpath.extractors"]
+# Test dummy extractor for integration tests
+dummy = "visualpath.core.extractor:DummyExtractor"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/visualpath/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/visualpath"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "integration: marks tests as integration tests (require VISUALPATH_INTEGRATION_TESTS=1)",
+]
+
+[tool.uv.sources]
+visualbase = { path = "../visualbase", editable = true }

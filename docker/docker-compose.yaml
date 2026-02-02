@@ -1,0 +1,89 @@
+# visualpath Docker Compose
+#
+# Example multi-container setup for distributed pipeline processing.
+#
+# Usage:
+#   docker-compose -f docker/docker-compose.yaml up
+#   docker-compose -f docker/docker-compose.yaml up -d  # Detached mode
+#   docker-compose -f docker/docker-compose.yaml down
+
+version: "3.8"
+
+services:
+  # ==========================================================================
+  # Main ingest service - runs the pipeline coordinator
+  # ==========================================================================
+  ingest:
+    image: visualpath:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: run --config /config/pipeline.yaml
+    volumes:
+      - ./configs:/config:ro
+      - pipeline-logs:/logs
+    environment:
+      - LOG_DIR=/logs
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      - face-worker
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Face detection worker - GPU-accelerated
+  # ==========================================================================
+  face-worker:
+    image: visualpath:gpu
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    command: visualpath-worker --listen tcp://0.0.0.0:5555
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Quality worker - CPU-only, lightweight
+  # ==========================================================================
+  quality-worker:
+    image: visualpath:latest
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: visualpath-worker --listen tcp://0.0.0.0:5556
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Optional: Log viewer for observability
+  # ==========================================================================
+  # log-viewer:
+  #   image: datalust/seq:latest
+  #   ports:
+  #     - "5341:80"
+  #   volumes:
+  #     - seq-data:/data
+  #   environment:
+  #     - ACCEPT_EULA=Y
+
+# Volumes for persistent data
+volumes:
+  pipeline-logs:
+    driver: local
+  # seq-data:
+  #   driver: local
+
+# Optional: Custom network for isolation
+networks:
+  default:
+    name: visualpath-network
+    driver: bridge

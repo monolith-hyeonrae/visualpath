@@ -1,0 +1,34 @@
+# Simple single-pipeline configuration
+#
+# This example shows a basic face analysis pipeline running
+# entirely in-process (no isolation).
+#
+# Usage:
+#   visualpath validate -c examples/configs/simple.yaml
+#   visualpath run -c examples/configs/simple.yaml --dry-run
+
+version: "1.0"
+
+pipelines:
+  face_analysis:
+    # List of extractors that run in parallel
+    extractors:
+      - name: dummy
+        isolation: inline
+        config:
+          delay_ms: 10.0
+
+    # Fusion module that combines observations
+    fusion:
+      name: simple
+      config:
+        threshold: 0.5
+        cooldown_sec: 2.0
+
+    # Observability settings
+    observability:
+      level: normal
+      sinks:
+        - type: file
+          path: "${LOG_DIR:-./logs}/trace.jsonl"
+        - type: console
