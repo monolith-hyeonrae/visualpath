@@ -22,6 +22,18 @@ Example:
     ...             t_ns=frame.t_src_ns,
     ...             data=features,
     ...         )
+
+Dependency-based extraction:
+    >>> class ExpressionExtractor(BaseExtractor):
+    ...     depends = ["face_detect"]  # Requires face_detect to run first
+    ...
+    ...     def extract(self, frame: Frame, deps: Dict[str, Observation] = None):
+    ...         face_obs = deps.get("face_detect") if deps else None
+    ...         if not face_obs:
+    ...             return None
+    ...         faces = face_obs.data["faces"]
+    ...         # Analyze expressions using detected faces
+    ...         return Observation(...)
 """
 
 from abc import ABC, abstractmethod
@@ -75,6 +87,7 @@ class BaseExtractor(ABC):
     - extract: Process a frame and return an observation
 
     Optional overrides:
+    - depends: List of extractor names this extractor depends on
     - initialize: Load models or resources
     - cleanup: Release resources
     - recommended_isolation: Suggest isolation level for this extractor
@@ -94,7 +107,20 @@ class BaseExtractor(ABC):
         ...             data=objects,
         ...             signals={"object_count": len(objects)},
         ...         )
+
+    Dependency example:
+        >>> class ExpressionExtractor(BaseExtractor):
+        ...     depends = ["face_detect"]
+        ...
+        ...     def extract(self, frame, deps=None):
+        ...         face_obs = deps["face_detect"] if deps else None
+        ...         if not face_obs:
+        ...             return None
+        ...         # Use face_obs.data["faces"] for expression analysis
     """
+
+    # Class attribute: list of extractor names this extractor depends on
+    depends: List[str] = []
 
     @property
     @abstractmethod
@@ -103,11 +129,17 @@ class BaseExtractor(ABC):
         ...
 
     @abstractmethod
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def extract(
+        self,
+        frame: Frame,
+        deps: Optional[Dict[str, "Observation"]] = None,
+    ) -> Optional[Observation]:
         """Extract features from a frame.
 
         Args:
             frame: Input frame to analyze.
+            deps: Optional dict of observations from dependent extractors.
+                  Keys are extractor names listed in `depends`.
 
         Returns:
             Observation containing extracted features, or None if
@@ -173,7 +205,11 @@ class DummyExtractor(BaseExtractor):
     def name(self) -> str:
         return "dummy"
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def extract(
+        self,
+        frame: Frame,
+        deps: Optional[Dict[str, "Observation"]] = None,
+    ) -> Optional[Observation]:
         """Extract dummy observation from frame."""
         import time
 

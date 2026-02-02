@@ -1,66 +1,148 @@
 # visualpath
 
-영상 분석 파이프라인 플랫폼. 플러그인 기반 extractor를 다양한 격리 수준으로 실행합니다.
+영상 분석 파이프라인 플랫폼.
 
-## 핵심 기능
+## Quick Start
 
-| 기능 | 설명 |
-|------|------|
-| **Extractor 인터페이스** | `BaseExtractor`, `Observation` 추상 클래스 |
-| **Plugin Discovery** | `entry_points` 기반 자동 플러그인 탐색 |
-| **격리 실행** | Inline, Thread, Process, Venv 수준 지원 |
-| **VenvWorker** | 독립 venv에서 subprocess로 실행 (의존성 충돌 해결) |
-| **Fusion** | 여러 extractor 결과를 통합하여 결정 |
-| **Observability** | TraceLevel 기반 로깅/추적 |
+```python
+import visualpath as vp
+
+# 비디오 처리 (one-liner)
+triggers = vp.run("video.mp4", extractors=["face", "pose"])
+```
+
+### Custom Extractor (3줄)
+
+```python
+@vp.extractor("brightness")
+def check_brightness(frame):
+    return {"brightness": float(frame.data.mean())}
+```
+
+### Custom Fusion (4줄)
+
+```python
+@vp.fusion(sources=["face"], cooldown=2.0)
+def smile_detector(face):
+    if face.get("happy", 0) > 0.5:
+        return vp.trigger("smile", score=face["happy"])
+```
+
+### 실행
+
+```python
+# 간단히
+triggers = vp.run("video.mp4", extractors=["brightness"])
+
+# 콜백과 함께
+vp.run("video.mp4", ["face"], fusion=smile_detector,
+       on_trigger=lambda t: print(f"Trigger: {t.label}"))
+
+# 상세 결과
+result = vp.process("video.mp4", ["face", "pose"])
+print(f"{len(result.triggers)} triggers in {result.frame_count} frames")
+```
 
 ## 설치
 
 ```bash
-# 기본 설치
 uv pip install -e .
-
-# ZMQ IPC 지원 (VenvWorker 사용 시)
-uv pip install -e ".[zmq]"
 ```
 
-## 아키텍처
+## API Reference
 
+### High-level API
+
+| 함수 | 용도 |
+|------|------|
+| `@vp.extractor(name)` | 함수를 extractor로 변환 |
+| `@vp.fusion(sources, cooldown)` | 함수를 fusion으로 변환 |
+| `vp.trigger(reason, score)` | 트리거 생성 |
+| `vp.run(video, extractors)` | 비디오 처리 (triggers 반환) |
+| `vp.process(video, extractors)` | 비디오 처리 (상세 결과) |
+| `vp.list_extractors()` | 사용 가능한 extractor 목록 |
+| `vp.list_fusions()` | 사용 가능한 fusion 목록 |
+| `vp.get_extractor(name)` | 이름으로 extractor 가져오기 |
+
+### Extractor Options
+
+```python
+# 초기화/정리 함수
+model = None
+
+def load_model():
+    global model
+    model = MyModel()
+
+@vp.extractor("detector", init=load_model, cleanup=lambda: model.close())
+def detect(frame):
+    return {"count": len(model.detect(frame.data))}
+
+# Context manager로 사용
+with check_brightness:
+    obs = check_brightness.extract(frame)
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Main Process                                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │ InlineWorker │  │ ThreadWorker │  │  VenvWorker  │       │
-│  │  (동일 스레드) │  │  (별도 스레드) │  │ (별도 프로세스) │       │
-│  └──────────────┘  └──────────────┘  └──────┬───────┘       │
-└─────────────────────────────────────────────┼───────────────┘
-                                              │ ZMQ IPC
-┌─────────────────────────────────────────────┼───────────────┐
-│  Subprocess (venv-face/bin/python)          │               │
-│  ┌──────────────────────────────────────────▼─────────────┐ │
-│  │  visualpath.process.worker                             │ │
-│  │    - Entry point로 extractor 로드                       │ │
-│  │    - Frame 수신 → extract() → Observation 응답          │ │
-│  └────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
+
+### Fusion Options
+
+```python
+@vp.fusion(
+    sources=["face", "pose"],  # 필요한 extractor들
+    name="my_fusion",          # 이름 (기본: 함수명)
+    cooldown=3.0,              # 트리거 간 최소 간격 (초)
+)
+def multi_source(face, pose):
+    if face.get("happy") > 0.5 and pose.get("wave"):
+        return vp.trigger("greeting", score=0.9, face_id=face.get("id"))
 ```
 
-## 사용법
+### Return Values
 
-### 1. Extractor 작성
+```python
+# Extractor: dict 반환 (자동 변환)
+@vp.extractor("objects")
+def detect(frame):
+    return {
+        "count": 3.0,                    # signals에 저장
+        "boxes": [[10, 20, 30, 40]],     # data에 저장 (non-scalar)
+    }
+
+# Fusion: vp.trigger() 또는 None 반환
+@vp.fusion(sources=["objects"])
+def alert(objects):
+    if objects.get("count", 0) > 5:
+        return vp.trigger("crowded", score=objects["count"] / 10)
+    # return None (또는 생략) = 트리거 없음
+```
+
+---
+
+## Advanced Usage
+
+### Class-based Extractor
+
+복잡한 상태 관리가 필요한 경우:
 
 ```python
 from visualpath.core import BaseExtractor, Observation
-from visualbase import Frame
 
 class MyExtractor(BaseExtractor):
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold
+        self.model = None
+
     @property
     def name(self) -> str:
         return "my_extractor"
 
-    def extract(self, frame: Frame) -> Observation:
-        # 분석 로직
-        score = self._analyze(frame.data)
+    def initialize(self) -> None:
+        self.model = load_model()
 
+    def cleanup(self) -> None:
+        self.model.close()
+
+    def extract(self, frame) -> Observation:
+        score = self.model.analyze(frame.data)
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
@@ -69,33 +151,27 @@ class MyExtractor(BaseExtractor):
         )
 ```
 
-### 2. 플러그인 등록 (pyproject.toml)
+### Plugin Registration
+
+플러그인으로 배포하려면 `pyproject.toml`에 entry point 등록:
 
 ```toml
 [project.entry-points."visualpath.extractors"]
 my_extractor = "mypackage.extractors:MyExtractor"
+
+[project.entry-points."visualpath.fusions"]
+my_fusion = "mypackage.fusions:MyFusion"
 ```
 
-### 3. 플러그인 탐색 및 사용
+### Worker Isolation
 
-```python
-from visualpath.plugin import discover_extractors, create_extractor
-
-# 등록된 extractor 목록
-extractors = discover_extractors()
-print(list(extractors.keys()))  # ['my_extractor', 'face', 'pose', ...]
-
-# 인스턴스 생성
-extractor = create_extractor("my_extractor")
-```
-
-### 4. Worker로 실행
+ML 의존성 충돌 해결을 위한 격리 실행:
 
 ```python
 from visualpath.process import WorkerLauncher
 from visualpath.core import IsolationLevel
 
-# Inline (동일 프로세스)
+# Inline (동일 프로세스, 기본)
 worker = WorkerLauncher.create(
     level=IsolationLevel.INLINE,
     extractor=my_extractor,
@@ -107,24 +183,19 @@ worker = WorkerLauncher.create(
     extractor=my_extractor,
 )
 
-# Venv (별도 venv에서 subprocess로 실행)
+# Venv (별도 venv에서 subprocess)
 worker = WorkerLauncher.create(
     level=IsolationLevel.VENV,
-    extractor=None,  # subprocess에서 entry_point로 로드
-    venv_path="/path/to/venv",
-    extractor_name="my_extractor",
+    venv_path="/path/to/venv-face",
+    extractor_name="face",  # entry_point로 로드
 )
 
-# 실행
 worker.start()
 result = worker.process(frame)
-print(result.observation.signals)
 worker.stop()
 ```
 
-### 5. VenvWorker로 의존성 충돌 해결
-
-서로 다른 의존성을 가진 extractor들을 각각의 venv에서 실행:
+### VenvWorker로 의존성 충돌 해결
 
 ```bash
 # 각 worker용 venv 생성
@@ -140,50 +211,37 @@ from visualpath.process import VenvWorker
 
 # Face worker (insightface, onnxruntime-gpu)
 face_worker = VenvWorker(
-    extractor=None,
     venv_path="/path/to/venv-face",
     extractor_name="face",
 )
 
 # Pose worker (ultralytics, torch)
 pose_worker = VenvWorker(
-    extractor=None,
     venv_path="/path/to/venv-pose",
     extractor_name="pose",
 )
 
-# 각각 독립된 프로세스에서 실행 - 의존성 충돌 없음!
+# 각각 독립된 프로세스에서 실행
 face_worker.start()
 pose_worker.start()
 ```
 
-## 모듈 구조
+## Architecture
 
 ```
-visualpath/
-├── core/
-│   ├── extractor.py    # BaseExtractor, Observation, DummyExtractor
-│   ├── fusion.py       # BaseFusion, FusionResult
-│   ├── isolation.py    # IsolationLevel, IsolationConfig
-│   └── path.py         # Path, PathOrchestrator
-├── process/
-│   ├── launcher.py     # WorkerLauncher, InlineWorker, ThreadWorker, VenvWorker
-│   ├── worker.py       # Subprocess 진입점 (visualpath-worker CLI)
-│   ├── mapper.py       # ObservationMapper, CompositeMapper
-│   ├── ipc.py          # ExtractorProcess, FusionProcess
-│   └── orchestrator.py # ExtractorOrchestrator
-├── plugin/
-│   └── discovery.py    # discover_extractors, PluginRegistry
-├── backends/
-│   └── protocols.py    # DetectionBackend, DetectionResult
-└── observability/
-    ├── records.py      # TraceRecord 타입들
-    └── sinks.py        # FileSink, ConsoleSink, MemorySink
+┌─────────────────────────────────────────────────────────────┐
+│  vp.run("video.mp4", extractors=["face", "pose"])           │
+│                                                             │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐   │
+│  │   Source    │ ──► │  Extractor  │ ──► │   Fusion    │   │
+│  │  (frames)   │     │ (parallel)  │     │ (triggers)  │   │
+│  └─────────────┘     └─────────────┘     └─────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## IPC 아키텍처 (A-B*-C 패턴)
+### IPC Architecture (A-B*-C)
 
-분산 환경에서의 프레임 처리 파이프라인:
+분산 환경에서의 처리:
 
 ```
 A (Ingest) ←── TRIG ──← C (Fusion)
@@ -195,53 +253,40 @@ A (Ingest) ←── TRIG ──← C (Fusion)
     └→ B3: Extractor3 ───→ ┘
 ```
 
-- **ExtractorProcess**: 프레임 읽기 → 추출 → Observation 전송
-- **FusionProcess**: Observation 수신 → frame_id 기준 정렬 (100ms 윈도우) → Trigger 판단
+## Module Structure
 
-## 디자인 패턴
+```
+visualpath/
+├── api.py              # High-level API (@extractor, @fusion, run, process)
+├── core/
+│   ├── extractor.py    # BaseExtractor, Observation
+│   ├── fusion.py       # BaseFusion, FusionResult
+│   └── isolation.py    # IsolationLevel
+├── process/
+│   ├── launcher.py     # WorkerLauncher, VenvWorker
+│   └── worker.py       # Subprocess entry point
+├── plugin/
+│   └── discovery.py    # discover_extractors, PluginRegistry
+├── flow/               # FlowGraph (DAG-based pipeline)
+└── observability/      # Tracing & logging
+```
 
-| 패턴 | 적용 위치 | 용도 |
-|------|----------|------|
-| **Abstract Base Class** | BaseExtractor, BaseFusion, BaseWorker | 인터페이스 정의 |
-| **Generic Type** | `Observation[T]` | 도메인별 데이터 타입 지원 |
-| **Protocol** | ObservationMapper, DetectionBackend | 구조적 서브타이핑 |
-| **Factory Method** | WorkerLauncher.create() | 격리 수준별 Worker 생성 |
-| **Singleton** | ObservabilityHub | 전역 트레이싱 설정 |
-| **Chain of Responsibility** | CompositeMapper | 플러그인 가능한 직렬화 |
-| **Context Manager** | Path, PathOrchestrator, BaseExtractor | 리소스 관리 |
-
-## 성능 특성
+## Performance
 
 | 격리 수준 | 오버헤드 | 용도 |
 |----------|---------|------|
 | INLINE | 0% | 빠른 경량 Extractor |
 | THREAD | ~2-5% | I/O 바운드 작업 |
-| PROCESS | ~5-10% | 메모리 격리 필요 시 |
+| PROCESS | ~5-10% | 메모리 격리 |
 | VENV | ~10-20% | ML 의존성 충돌 해결 |
 
-| Observability 레벨 | 오버헤드 | 용도 |
-|-------------------|---------|------|
-| OFF | 0% | 프로덕션 기본 |
-| MINIMAL | <1% | 중요 이벤트만 |
-| NORMAL | ~5% | 프레임 요약 |
-| VERBOSE | ~15% | 전체 디버깅 |
-
-## 스레드 안전성
-
-모든 주요 컴포넌트는 스레드 안전하게 설계되었습니다:
-
-- **ObservabilityHub**: Lock 기반 emit() 및 sink 관리
-- **FileSink/ConsoleSink/MemorySink**: Lock 기반 동기화
-- **ExtractorOrchestrator**: ThreadPoolExecutor 사용
-- **Path/PathOrchestrator**: ThreadPoolExecutor 사용
-
-## 테스트
+## Test
 
 ```bash
 uv run pytest tests/ -v
 ```
 
-## 문서
+## Documentation
 
-- [아키텍처 상세](docs/architecture.md): 아키텍처, 데이터 흐름, 확장 포인트
-- [스트림 동기화](docs/stream-synchronization.md): A-B*-C 동기화 문제와 해결책
+- [Architecture](docs/architecture.md)
+- [Stream Synchronization](docs/stream-synchronization.md)

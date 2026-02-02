@@ -111,6 +111,9 @@ class Path:
         if self._initialized:
             return
 
+        # Validate dependencies before initialization
+        self._validate_dependencies()
+
         for extractor in self._extractors:
             extractor.initialize()
 
@@ -118,6 +121,44 @@ class Path:
             self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
 
         self._initialized = True
+
+    def _validate_dependencies(self) -> None:
+        """Validate that all extractor dependencies are satisfied.
+
+        Checks:
+        - All depends are provided by earlier extractors or external deps
+        - No circular dependencies within this path
+
+        Raises:
+            ValueError: If dependencies are not satisfied.
+        """
+        available: set[str] = set()
+
+        for extractor in self._extractors:
+            # Check if all depends are available
+            depends = set(extractor.depends) if extractor.depends else set()
+            missing = depends - available
+
+            if missing:
+                raise ValueError(
+                    f"Extractor '{extractor.name}' depends on {missing}, "
+                    f"but only {available or 'nothing'} is available. "
+                    f"Reorder extractors or provide external_deps."
+                )
+
+            # This extractor's output is now available for subsequent extractors
+            available.add(extractor.name)
+
+    def get_dependency_graph(self) -> Dict[str, List[str]]:
+        """Get the dependency graph for extractors in this path.
+
+        Returns:
+            Dict mapping extractor names to their dependencies.
+        """
+        return {
+            ext.name: list(ext.depends) if ext.depends else []
+            for ext in self._extractors
+        }
 
     def cleanup(self) -> None:
         """Clean up all extractors and fusion module."""
@@ -140,11 +181,17 @@ class Path:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.cleanup()
 
-    def extract_all(self, frame: "Frame") -> List[Observation]:
+    def extract_all(
+        self,
+        frame: "Frame",
+        external_deps: Optional[Dict[str, Observation]] = None,
+    ) -> List[Observation]:
         """Run all extractors on a frame.
 
         Args:
             frame: The input frame to process.
+            external_deps: Optional observations from previous extractors
+                          (e.g., from upstream PathNodes in FlowGraph).
 
         Returns:
             List of observations from all extractors.
@@ -152,27 +199,79 @@ class Path:
         if not self._initialized:
             raise RuntimeError("Path not initialized. Use context manager or call initialize().")
 
-        if self._parallel and self._executor and len(self._extractors) > 1:
-            return self._extract_parallel(frame)
-        else:
-            return self._extract_sequential(frame)
+        # Always use sequential with deps for dependency resolution
+        return self._extract_with_deps(frame, external_deps)
 
-    def _extract_sequential(self, frame: "Frame") -> List[Observation]:
-        """Extract features sequentially."""
-        observations = []
+    def _extract_with_deps(
+        self,
+        frame: "Frame",
+        external_deps: Optional[Dict[str, Observation]] = None,
+    ) -> List[Observation]:
+        """Extract features with dependency resolution.
+
+        Extractors are run in order, with each extractor receiving
+        observations from its dependencies.
+        """
+        # Build deps dict from external deps
+        deps: Dict[str, Observation] = dict(external_deps) if external_deps else {}
+        observations: List[Observation] = []
+
         for extractor in self._extractors:
-            obs = extractor.extract(frame)
+            # Build deps for this extractor
+            extractor_deps = None
+            if extractor.depends:
+                extractor_deps = {
+                    name: deps[name]
+                    for name in extractor.depends
+                    if name in deps
+                }
+
+            # Extract (with backward compatibility)
+            obs = self._call_extract(extractor, frame, extractor_deps)
             if obs is not None:
                 observations.append(obs)
+                # Add to deps for subsequent extractors
+                deps[extractor.name] = obs
+
         return observations
 
+    def _call_extract(
+        self,
+        extractor: BaseExtractor,
+        frame: "Frame",
+        deps: Optional[Dict[str, Observation]],
+    ) -> Optional[Observation]:
+        """Call extractor.extract with backward compatibility.
+
+        Handles extractors that don't accept the deps parameter.
+        """
+        try:
+            return extractor.extract(frame, deps)
+        except TypeError:
+            # Fallback for extractors without deps parameter
+            return extractor.extract(frame)
+
+    def _extract_sequential(self, frame: "Frame") -> List[Observation]:
+        """Extract features sequentially (legacy, no deps)."""
+        return self._extract_with_deps(frame, None)
+
     def _extract_parallel(self, frame: "Frame") -> List[Observation]:
-        """Extract features in parallel using threads."""
+        """Extract features in parallel using threads.
+
+        Note: Only extractors without dependencies can run in parallel.
+        Extractors with dependencies fall back to sequential execution.
+        """
         if self._executor is None:
             return self._extract_sequential(frame)
 
+        # Check if any extractor has dependencies
+        has_deps = any(ext.depends for ext in self._extractors)
+        if has_deps:
+            # Fall back to sequential for dependency resolution
+            return self._extract_with_deps(frame, None)
+
         futures = {
-            self._executor.submit(extractor.extract, frame): extractor
+            self._executor.submit(self._call_extract, extractor, frame, None): extractor
             for extractor in self._extractors
         }
 

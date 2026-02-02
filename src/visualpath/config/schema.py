@@ -4,7 +4,7 @@ Defines the schema for YAML configuration files with validation
 rules and sensible defaults.
 """
 
-from typing import Dict, List, Any, Optional, Literal
+from typing import Dict, List, Any, Optional, Literal, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -118,5 +118,138 @@ class ConfigSchema(BaseModel):
         if v not in supported:
             raise ValueError(
                 f"Unsupported config version: {v}. Supported: {supported}"
+            )
+        return v
+
+
+# =============================================================================
+# Flow Graph Configuration Schema
+# =============================================================================
+
+
+class FlowNodeSchema(BaseModel):
+    """Configuration for a flow graph node.
+
+    Attributes:
+        name: Unique name for this node.
+        type: Node type (source, path, sampler, filter, branch, fanout, join).
+        config: Node-specific configuration.
+    """
+
+    name: str
+    type: Literal[
+        "source",
+        "path",
+        "sampler",
+        "rate_limiter",
+        "filter",
+        "observation_filter",
+        "signal_filter",
+        "branch",
+        "fanout",
+        "multi_branch",
+        "join",
+        "cascade_fusion",
+        "collector",
+    ]
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_node_config(self) -> "FlowNodeSchema":
+        """Validate node-specific configuration requirements."""
+        cfg = self.config
+
+        if self.type == "sampler":
+            if "every_nth" not in cfg:
+                cfg["every_nth"] = 1
+
+        elif self.type == "rate_limiter":
+            if "min_interval_ms" not in cfg:
+                raise ValueError("rate_limiter requires 'min_interval_ms'")
+
+        elif self.type == "path":
+            # path can have extractors and/or fusion
+            pass
+
+        elif self.type == "branch":
+            required = ["condition", "if_true", "if_false"]
+            for field in required:
+                if field not in cfg:
+                    raise ValueError(f"branch requires '{field}'")
+
+        elif self.type == "fanout":
+            if "paths" not in cfg or not cfg["paths"]:
+                raise ValueError("fanout requires non-empty 'paths' list")
+
+        elif self.type == "join":
+            if "input_paths" not in cfg or not cfg["input_paths"]:
+                raise ValueError("join requires non-empty 'input_paths' list")
+
+        elif self.type == "signal_filter":
+            required = ["signal_name", "threshold"]
+            for field in required:
+                if field not in cfg:
+                    raise ValueError(f"signal_filter requires '{field}'")
+
+        return self
+
+
+class FlowEdgeSchema(BaseModel):
+    """Configuration for a flow graph edge.
+
+    Attributes:
+        source: Name of the source node.
+        target: Name of the target node.
+        path_filter: Optional path_id filter for conditional routing.
+    """
+
+    source: str
+    target: str
+    path_filter: Optional[str] = None
+
+
+class FlowGraphSchema(BaseModel):
+    """Configuration for a complete flow graph.
+
+    Attributes:
+        version: Flow config version.
+        entry: Name of the entry node.
+        nodes: List of node configurations.
+        edges: List of edge configurations.
+        on_trigger: Optional trigger handler reference.
+    """
+
+    version: str = "1.0"
+    entry: str
+    nodes: List[FlowNodeSchema] = Field(min_length=1)
+    edges: List[FlowEdgeSchema] = Field(default_factory=list)
+    on_trigger: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> "FlowGraphSchema":
+        """Validate graph structure."""
+        node_names = {node.name for node in self.nodes}
+
+        # Check entry node exists
+        if self.entry not in node_names:
+            raise ValueError(f"Entry node '{self.entry}' not found in nodes")
+
+        # Check all edge endpoints exist
+        for edge in self.edges:
+            if edge.source not in node_names:
+                raise ValueError(f"Edge source '{edge.source}' not found in nodes")
+            if edge.target not in node_names:
+                raise ValueError(f"Edge target '{edge.target}' not found in nodes")
+
+        return self
+
+    @field_validator("version")
+    @classmethod
+    def validate_flow_version(cls, v: str) -> str:
+        """Validate flow config version."""
+        supported = {"1.0"}
+        if v not in supported:
+            raise ValueError(
+                f"Unsupported flow config version: {v}. Supported: {supported}"
             )
         return v

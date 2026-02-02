@@ -1,0 +1,697 @@
+"""Tests for FlowGraph, GraphExecutor, and FlowGraphBuilder."""
+
+import pytest
+import numpy as np
+from dataclasses import dataclass
+from typing import Optional, List
+
+from visualpath.core import (
+    BaseExtractor,
+    Observation,
+    BaseFusion,
+    FusionResult,
+)
+from visualpath.flow import (
+    FlowData,
+    FlowGraph,
+    Edge,
+    GraphExecutor,
+    FlowGraphBuilder,
+    SourceNode,
+    PathNode,
+    SamplerNode,
+    FilterNode,
+    BranchNode,
+    FanOutNode,
+    JoinNode,
+)
+from visualpath.core.path import Path
+
+
+# =============================================================================
+# Test Fixtures
+# =============================================================================
+
+
+@dataclass
+class MockFrame:
+    """Mock Frame for testing."""
+    frame_id: int
+    t_src_ns: int
+    data: np.ndarray
+
+
+class CountingExtractor(BaseExtractor):
+    """Extractor that counts calls for testing."""
+
+    def __init__(self, name: str, return_value: float = 0.5):
+        self._name = name
+        self._return_value = return_value
+        self._extract_count = 0
+        self._initialized = False
+        self._cleaned_up = False
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def extract(self, frame) -> Optional[Observation]:
+        self._extract_count += 1
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"value": self._return_value, "call_count": self._extract_count},
+        )
+
+    def initialize(self) -> None:
+        self._initialized = True
+
+    def cleanup(self) -> None:
+        self._cleaned_up = True
+
+
+class ThresholdFusion(BaseFusion):
+    """Simple fusion for testing."""
+
+    def __init__(self, threshold: float = 0.5):
+        self._threshold = threshold
+        self._gate_open = True
+        self._cooldown = False
+        self._update_count = 0
+
+    def update(self, observation: Observation) -> FusionResult:
+        self._update_count += 1
+        value = observation.signals.get("value", 0)
+        if value > self._threshold:
+            return FusionResult(
+                should_trigger=True,
+                score=value,
+                reason="threshold_exceeded",
+                observations_used=1,
+            )
+        return FusionResult(should_trigger=False)
+
+    def reset(self) -> None:
+        self._update_count = 0
+
+    @property
+    def is_gate_open(self) -> bool:
+        return self._gate_open
+
+    @property
+    def in_cooldown(self) -> bool:
+        return self._cooldown
+
+
+def make_frame(frame_id: int = 1, t_ns: int = 1_000_000) -> MockFrame:
+    """Create a mock frame."""
+    return MockFrame(
+        frame_id=frame_id,
+        t_src_ns=t_ns,
+        data=np.zeros((100, 100, 3), dtype=np.uint8),
+    )
+
+
+# =============================================================================
+# FlowGraph Tests
+# =============================================================================
+
+
+class TestFlowGraph:
+    """Tests for FlowGraph class."""
+
+    def test_empty_graph(self):
+        """Test creating empty graph."""
+        graph = FlowGraph()
+
+        assert len(graph.nodes) == 0
+        assert len(graph.edges) == 0
+        assert graph.entry_node is None
+
+    def test_add_node(self):
+        """Test adding nodes."""
+        graph = FlowGraph()
+        source = SourceNode("source")
+
+        graph.add_node(source)
+
+        assert "source" in graph.nodes
+        assert graph.entry_node == "source"  # First node becomes entry
+
+    def test_add_duplicate_node_raises(self):
+        """Test that duplicate node names raise error."""
+        graph = FlowGraph()
+        source1 = SourceNode("source")
+        source2 = SourceNode("source")
+
+        graph.add_node(source1)
+
+        with pytest.raises(ValueError, match="already exists"):
+            graph.add_node(source2)
+
+    def test_add_edge(self):
+        """Test adding edges."""
+        graph = FlowGraph()
+        source = SourceNode("source")
+        sampler = SamplerNode("sampler")
+
+        graph.add_node(source)
+        graph.add_node(sampler)
+        graph.add_edge("source", "sampler")
+
+        assert len(graph.edges) == 1
+        assert graph.edges[0].source == "source"
+        assert graph.edges[0].target == "sampler"
+
+    def test_add_edge_invalid_source(self):
+        """Test that invalid edge source raises error."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+
+        with pytest.raises(ValueError, match="not in graph"):
+            graph.add_edge("nonexistent", "source")
+
+    def test_add_edge_invalid_target(self):
+        """Test that invalid edge target raises error."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+
+        with pytest.raises(ValueError, match="not in graph"):
+            graph.add_edge("source", "nonexistent")
+
+    def test_get_outgoing_edges(self):
+        """Test getting outgoing edges."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_edge("a", "b")
+        graph.add_edge("a", "c")
+
+        edges = graph.get_outgoing_edges("a")
+
+        assert len(edges) == 2
+        targets = {e.target for e in edges}
+        assert targets == {"b", "c"}
+
+    def test_get_successors(self):
+        """Test getting successor nodes."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_edge("a", "b")
+        graph.add_edge("a", "c", path_filter="special")
+
+        # Without path filter - only unfiltered edge
+        successors_default = graph.get_successors("a", path_id="default")
+        assert "b" in successors_default
+        assert "c" not in successors_default
+
+        # With matching path filter
+        successors_special = graph.get_successors("a", path_id="special")
+        assert "b" in successors_special
+        assert "c" in successors_special
+
+    def test_get_terminal_nodes(self):
+        """Test getting terminal nodes."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_edge("a", "b")
+        # c has no outgoing edges
+
+        terminals = graph.get_terminal_nodes()
+
+        assert "b" in terminals
+        assert "c" in terminals
+        assert "a" not in terminals
+
+    def test_validate_no_entry(self):
+        """Test validation fails without entry node."""
+        graph = FlowGraph()
+
+        with pytest.raises(ValueError, match="No entry node"):
+            graph.validate()
+
+    def test_validate_cycle_detection(self):
+        """Test validation detects cycles."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_edge("a", "b")
+        graph.add_edge("b", "c")
+        graph.add_edge("c", "a")  # Creates cycle
+
+        with pytest.raises(ValueError, match="Cycle detected"):
+            graph.validate()
+
+    def test_validate_unreachable(self):
+        """Test validation detects unreachable nodes."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_edge("a", "b")
+        # c is not connected
+
+        with pytest.raises(ValueError, match="Unreachable"):
+            graph.validate()
+
+    def test_validate_success(self):
+        """Test successful validation."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_edge("a", "b")
+        graph.add_edge("b", "c")
+
+        graph.validate()  # Should not raise
+
+    def test_topological_order(self):
+        """Test topological ordering."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("a"))
+        graph.add_node(SamplerNode("b"))
+        graph.add_node(SamplerNode("c"))
+        graph.add_node(SamplerNode("d"))
+        graph.add_edge("a", "b")
+        graph.add_edge("a", "c")
+        graph.add_edge("b", "d")
+        graph.add_edge("c", "d")
+
+        order = graph.topological_order()
+
+        assert order.index("a") < order.index("b")
+        assert order.index("a") < order.index("c")
+        assert order.index("b") < order.index("d")
+        assert order.index("c") < order.index("d")
+
+    def test_on_trigger(self):
+        """Test trigger callback registration."""
+        graph = FlowGraph()
+        triggered = []
+
+        graph.on_trigger(lambda d: triggered.append(d))
+
+        # Create data with triggering result
+        result = FusionResult(should_trigger=True, score=0.9)
+        data = FlowData(results=[result])
+
+        graph.fire_triggers(data)
+
+        assert len(triggered) == 1
+
+    def test_context_manager(self):
+        """Test graph as context manager."""
+        ext = CountingExtractor("ext1")
+        path = Path(name="test", extractors=[ext])
+        path_node = PathNode(path=path)
+
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(path_node)
+        graph.add_edge("source", "test")
+
+        assert not ext._initialized
+
+        with graph:
+            assert ext._initialized
+
+        assert ext._cleaned_up
+
+
+# =============================================================================
+# GraphExecutor Tests
+# =============================================================================
+
+
+class TestGraphExecutor:
+    """Tests for GraphExecutor class."""
+
+    def test_simple_pipeline(self):
+        """Test executing a simple pipeline."""
+        ext = CountingExtractor("ext1", return_value=0.7)
+        path = Path(name="test", extractors=[ext])
+        path_node = PathNode(path=path, run_fusion=False)
+
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(path_node)
+        graph.add_edge("source", "test")
+
+        executor = GraphExecutor(graph)
+        frame = make_frame()
+
+        with executor:
+            results = executor.process(frame)
+
+        assert len(results) == 1
+        assert len(results[0].observations) == 1
+
+    def test_sampler_in_pipeline(self):
+        """Test sampler node in pipeline."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(SamplerNode("sampler", every_nth=3))
+        graph.add_edge("source", "sampler")
+
+        executor = GraphExecutor(graph)
+        results = []
+
+        with executor:
+            for i in range(9):
+                frame = make_frame(frame_id=i)
+                r = executor.process(frame)
+                results.extend(r)
+
+        # Only every 3rd frame passes
+        assert len(results) == 3
+
+    def test_branch_in_pipeline(self):
+        """Test branching in pipeline."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(BranchNode(
+            "branch",
+            condition=lambda d: d.metadata.get("go_a", False),
+            if_true="a",
+            if_false="b",
+        ))
+        graph.add_node(SamplerNode("path_a"))
+        graph.add_node(SamplerNode("path_b"))
+        graph.add_edge("source", "branch")
+        graph.add_edge("branch", "path_a", path_filter="a")
+        graph.add_edge("branch", "path_b", path_filter="b")
+
+        executor = GraphExecutor(graph)
+
+        with executor:
+            # Process frame that goes to path_a
+            frame = make_frame()
+            data = FlowData(frame=frame, metadata={"go_a": True})
+            results = executor.process_data(data)
+
+            assert len(results) == 1
+            assert results[0].path_id == "a"
+
+    def test_trigger_callback(self):
+        """Test trigger callback is called."""
+        ext = CountingExtractor("ext1", return_value=0.7)
+        fusion = ThresholdFusion(threshold=0.5)
+        path = Path(name="test", extractors=[ext], fusion=fusion)
+        path_node = PathNode(path=path, run_fusion=True)
+
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(path_node)
+        graph.add_edge("source", "test")
+
+        triggered = []
+        executor = GraphExecutor(graph, on_trigger=lambda d: triggered.append(d))
+
+        with executor:
+            frame = make_frame()
+            executor.process(frame)
+
+        assert len(triggered) == 1
+        assert triggered[0].results[0].should_trigger
+
+    def test_not_initialized_raises(self):
+        """Test that processing without initialization raises."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        executor = GraphExecutor(graph)
+
+        with pytest.raises(RuntimeError, match="not initialized"):
+            executor.process(make_frame())
+
+    def test_batch_processing(self):
+        """Test batch frame processing."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        executor = GraphExecutor(graph)
+
+        frames = [make_frame(frame_id=i) for i in range(5)]
+
+        with executor:
+            results = executor.process_batch(frames)
+
+        assert len(results) == 5
+
+
+# =============================================================================
+# FlowGraphBuilder Tests
+# =============================================================================
+
+
+class TestFlowGraphBuilder:
+    """Tests for FlowGraphBuilder class."""
+
+    def test_simple_build(self):
+        """Test building a simple graph."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .sample(every_nth=2)
+            .build())
+
+        assert "frames" in graph.nodes
+        assert "sampler_2" in graph.nodes
+        assert graph.entry_node == "frames"
+
+    def test_fluent_api(self):
+        """Test fluent API chaining."""
+        builder = FlowGraphBuilder()
+
+        result = (builder
+            .source("source")
+            .sample(every_nth=3)
+            .filter(condition=lambda d: True))
+
+        assert result is builder
+
+    def test_build_with_extractors(self):
+        """Test building with extractors."""
+        ext = CountingExtractor("ext1")
+
+        graph = (FlowGraphBuilder()
+            .register_extractor("ext1", ext)
+            .source("frames")
+            .path("test", extractors=["ext1"])
+            .build())
+
+        assert "test" in graph.nodes
+
+    def test_build_with_branch(self):
+        """Test building with branching."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .branch(
+                condition=lambda d: len(d.observations) > 0,
+                if_true="has_obs",
+                if_false="no_obs",
+            )
+            .build())
+
+        assert "branch_has_obs_no_obs" in graph.nodes
+
+    def test_build_with_fanout(self):
+        """Test building with fanout."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .fanout(paths=["a", "b", "c"])
+            .build())
+
+        assert "fanout_a_b_c" in graph.nodes
+
+    def test_build_with_join(self):
+        """Test building with join."""
+        ext_a = CountingExtractor("ext_a")
+        ext_b = CountingExtractor("ext_b")
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .fanout(paths=["a", "b"])
+            .path("a", extractors=[ext_a])
+            .path("b", extractors=[ext_b])
+            .join(["a", "b"])
+            .build())
+
+        assert "join_a_b" in graph.nodes
+
+    def test_build_with_trigger(self):
+        """Test building with trigger callback."""
+        triggered = []
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .on_trigger(lambda d: triggered.append(d))
+            .build())
+
+        # Verify callback was registered
+        result = FusionResult(should_trigger=True, score=0.9)
+        data = FlowData(results=[result])
+        graph.fire_triggers(data)
+
+        assert len(triggered) == 1
+
+    def test_edge_method(self):
+        """Test adding custom edges."""
+        # Create graph without auto-edges by not using add_node
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(SamplerNode("a"))
+        graph.add_node(SamplerNode("b"))
+
+        builder = FlowGraphBuilder()
+        builder._graph = graph
+        builder.edge("source", "a")
+        builder.edge("source", "b")
+
+        edges = graph.get_outgoing_edges("source")
+        assert len(edges) == 2
+
+    def test_rate_limit(self):
+        """Test rate limit builder method."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .rate_limit(min_interval_ms=100)
+            .build())
+
+        assert "rate_limit_100ms" in graph.nodes
+
+    def test_filter_observations(self):
+        """Test observation filter builder method."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .filter_observations(min_count=2)
+            .build())
+
+        assert "observation_filter" in graph.nodes
+
+    def test_filter_signal(self):
+        """Test signal filter builder method."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .filter_signal(signal_name="score", threshold=0.5)
+            .build())
+
+        assert "signal_filter_score" in graph.nodes
+
+    def test_cascade_fusion(self):
+        """Test cascade fusion builder method."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .cascade_fusion(fusion_fn=lambda d: d)
+            .build())
+
+        # Check node exists
+        assert any("cascade" in name for name in graph.nodes)
+
+    def test_collect(self):
+        """Test collector builder method."""
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .collect(batch_size=10)
+            .build())
+
+        # Check node exists
+        assert any("collector" in name for name in graph.nodes)
+
+
+# =============================================================================
+# Integration Tests
+# =============================================================================
+
+
+class TestFlowIntegration:
+    """Integration tests for the flow system."""
+
+    def test_complete_pipeline(self):
+        """Test a complete pipeline with sampling, extraction, and fusion."""
+        ext = CountingExtractor("ext1", return_value=0.7)
+        fusion = ThresholdFusion(threshold=0.5)
+
+        triggered = []
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .sample(every_nth=2)
+            .path("main", extractors=[ext], fusion=fusion)
+            .on_trigger(lambda d: triggered.append(d))
+            .build())
+
+        executor = GraphExecutor(graph)
+
+        with executor:
+            for i in range(6):
+                frame = make_frame(frame_id=i)
+                executor.process(frame)
+
+        # Only every 2nd frame triggers
+        assert len(triggered) == 3
+        assert ext._extract_count == 3
+
+    def test_branching_pipeline(self):
+        """Test pipeline with conditional branching."""
+        ext_human = CountingExtractor("human_ext")
+        ext_scene = CountingExtractor("scene_ext")
+
+        frame_count = [0]
+
+        def has_face(data: FlowData) -> bool:
+            frame_count[0] += 1
+            return frame_count[0] % 2 == 0  # Every other frame "has face"
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .branch(
+                condition=has_face,
+                if_true="human",
+                if_false="scene",
+            )
+            .path("human", extractors=[ext_human])
+            .path("scene", extractors=[ext_scene])
+            .build())
+
+        executor = GraphExecutor(graph)
+
+        with executor:
+            for i in range(4):
+                frame = make_frame(frame_id=i)
+                executor.process(frame)
+
+        # 2 frames go to human, 2 to scene
+        assert ext_human._extract_count == 2
+        assert ext_scene._extract_count == 2
+
+    def test_parallel_paths_with_join(self):
+        """Test parallel processing paths that join."""
+        ext_a = CountingExtractor("ext_a", return_value=0.3)
+        ext_b = CountingExtractor("ext_b", return_value=0.5)
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .fanout(paths=["a", "b"])
+            .path("a", extractors=[ext_a])
+            .path("b", extractors=[ext_b])
+            .join(["a", "b"], mode="all")
+            .build())
+
+        executor = GraphExecutor(graph)
+
+        with executor:
+            frame = make_frame()
+            results = executor.process(frame)
+
+        # Both extractors should run
+        assert ext_a._extract_count == 1
+        assert ext_b._extract_count == 1
+
+        # Should have merged observations
+        assert len(results) == 1
+        assert len(results[0].observations) == 2
