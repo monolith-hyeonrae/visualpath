@@ -32,12 +32,18 @@ zmq = [
     "opencv-python>=4.5.0",  # For frame encoding/decoding
 ]
 
+# Pathway streaming backend
+pathway = [
+    "pathway>=0.8.0",
+]
+
 # All optional dependencies
 all = [
     "pyyaml>=6.0",
     "pydantic>=2.0",
     "pyzmq>=25.0.0",
     "opencv-python>=4.5.0",
+    "pathway>=0.8.0",
 ]
 
 [project.scripts]

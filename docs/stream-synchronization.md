@@ -13,7 +13,7 @@ visualpath의 A-B*-C 아키텍처에서 여러 데이터 스트림을 동기화�
 7. [해결책: 시간 윈도우 정렬](#해결책-시간-윈도우-정렬)
 8. [Observability 연동](#observability-연동)
 9. [설정 가이드](#설정-가이드)
-10. [향후: Bytewax 연동 가능성](#향후-bytewax-연동-가능성)
+10. [Pathway 백엔드](#pathway-백엔드) ← **구현 완료**
 
 ---
 
@@ -517,52 +517,116 @@ orchestrator = ExtractorOrchestrator(
 
 ---
 
-## 향후: Bytewax 연동 가능성
+## Pathway 백엔드
 
-더 복잡한 스트리밍 시나리오에서 Bytewax가 제공할 수 있는 기능:
+> **상태: 구현 완료** (2026-02-03)
 
-### 이벤트 시간 윈도잉
+Pathway 스트리밍 엔진을 실행 백엔드로 통합하여 위에서 설명한 동기화 문제들을 해결합니다.
+
+### 아키텍처
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  vp.run("video.mp4", backend="pathway")                 │
+└─────────────────────────────────────────────────────────┘
+                          │
+┌─────────────────────────┼─────────────────────────────┐
+│  ExecutionBackend ABC   │                              │
+│  ┌──────────────────────┴───────────────────────────┐ │
+│  │         run() / run_graph()                      │ │
+│  └──────────────────────────────────────────────────┘ │
+│       │                              │                 │
+│  ┌────┴────┐                   ┌────┴────┐           │
+│  │ Simple  │                   │ Pathway │           │
+│  │ Backend │                   │ Backend │           │
+│  │(기본)   │                   │  (NEW)  │           │
+│  └─────────┘                   └─────────┘           │
+└────────────────────────────────────────────────────────┘
+```
+
+### Pathway가 제공하는 기능
+
+| 기능 | SimpleBackend | PathwayBackend |
+|------|---------------|----------------|
+| 윈도우 정렬 | 100ms 고정, 수동 버퍼 | TumblingWindow + watermark |
+| Late arrival | 드롭 | `allowed_lateness` 처리 |
+| 백프레셔 | 수동 큐 관리 | Rust 엔진 내장 |
+| 병렬 처리 | ThreadPoolExecutor | Pathway workers |
+| Multi-path 동기화 | JoinNode (수동) | `interval_join` |
+
+### 사용법
 
 ```python
-from bytewax.dataflow import Dataflow
-from bytewax.window import TumblingWindow, EventClock
+import visualpath as vp
 
-flow = Dataflow("visualpath")
+# Simple 백엔드 (기본값)
+triggers = vp.run("video.mp4", ["face"], backend="simple")
 
-# 이벤트 시간 기반 윈도잉
-clock = EventClock(
-    lambda obs: obs.t_ns,
-    wait_for_system_duration=timedelta(ms=200)
+# Pathway 백엔드 (스트리밍)
+triggers = vp.run("video.mp4", ["face"], backend="pathway")
+```
+
+### PathwayBackend 설정
+
+```python
+from visualpath.backends.pathway import PathwayBackend
+
+backend = PathwayBackend(
+    window_ns=100_000_000,           # 100ms 윈도우
+    allowed_lateness_ns=50_000_000,  # 50ms 지연 허용
+    autocommit_ms=100,               # 커밋 간격
+    n_workers=2,                     # 워커 수
 )
-
-flow.collect_window("sync", clock, TumblingWindow(length=timedelta(ms=100)))
 ```
 
-### 대안: 이벤트 시간 워터마크
+### Operator 매핑
+
+| visualpath | Pathway | 설명 |
+|-----------|---------|------|
+| `Extractor.extract()` | `flat_map()` | Frame → Observation |
+| `JoinNode` (100ms) | `interval_join()` | 시간 기반 동기화 |
+| `BaseFusion.update()` | `stateful_map()` | 상태 유지 Fusion |
+| 백프레셔 | 내장 | Rust 엔진 자동 처리 |
+
+### 설치
+
+```bash
+# Pathway 백엔드 설치
+pip install visualpath[pathway]
+```
+
+### 구현 모듈
+
+```
+visualpath/backends/pathway/
+├── __init__.py      # PathwayBackend export
+├── backend.py       # PathwayBackend 구현
+├── connector.py     # VideoConnectorSubject (Frame → Pathway)
+├── operators.py     # Extractor/Fusion UDF 래퍼
+└── converter.py     # FlowGraph → Pathway 변환
+```
+
+### 이벤트 시간 윈도잉 예시
 
 ```python
-# 개념적 - 미구현
-class WatermarkSynchronizer:
-    def __init__(self, allowed_lateness_ms=200):
-        self.allowed_lateness = allowed_lateness_ms
-        self.watermark = 0  # 완료 보장된 최저 타임스탬프
-
-    def advance_watermark(self, sources):
-        # 워터마크 = min(각 소스의 최신 시간) - allowed_lateness
-        self.watermark = min(s.latest_t for s in sources) - self.allowed_lateness
+# Pathway 내부에서 사용되는 윈도잉
+frames_table.windowby(
+    pw.this.t_ns,
+    window=pw.temporal.tumbling(window_ns),
+    behavior=pw.temporal.common_behavior(
+        delay=allowed_lateness_ns
+    ),
+)
 ```
 
-### 비교
+### Multi-Extractor 동기화
 
-| 기능 | 현재 | Bytewax 사용 시 |
-|------|------|-----------------|
-| 윈도우 정렬 | 수동 100ms | TumblingWindow 설정 가능 |
-| 늦은 도착 처리 | 드롭 | `allowed_lateness` 파라미터 |
-| 순서 역전 | 미처리 | EventClock이 이벤트 시간으로 정렬 |
-| 워터마크 | 미구현 | 내장 |
-
-### 구현 경로
-
-1. **1단계** (현재): FusionProcess의 단순 시간 윈도우
-2. **2단계**: `StreamSynchronizer` 인터페이스 추상화
-3. **3단계**: Bytewax 백엔드 구현 (선택적)
+```python
+# interval_join으로 여러 Extractor 결과 동기화
+left_obs.interval_join(
+    right_obs,
+    pw.left.t_ns,
+    pw.right.t_ns,
+    pw.temporal.interval(-window_ns, window_ns),
+)
+```

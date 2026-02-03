@@ -34,6 +34,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Union,
     Sequence,
@@ -44,6 +45,9 @@ from visualbase import Frame, Trigger
 
 from visualpath.core.extractor import BaseExtractor, Observation
 from visualpath.core.fusion import BaseFusion, FusionResult
+
+# Backend type alias
+BackendType = Literal["simple", "pathway"]
 
 
 # =============================================================================
@@ -435,12 +439,44 @@ class ProcessResult:
     duration_sec: float = 0.0
 
 
+def _get_backend(backend: BackendType) -> "ExecutionBackend":
+    """Get execution backend by name.
+
+    Args:
+        backend: Backend name ("simple" or "pathway").
+
+    Returns:
+        ExecutionBackend instance.
+
+    Raises:
+        ValueError: If backend is unknown.
+        ImportError: If Pathway is requested but not installed.
+    """
+    from visualpath.backends.base import ExecutionBackend
+
+    if backend == "simple":
+        from visualpath.backends.simple import SimpleBackend
+        return SimpleBackend()
+    elif backend == "pathway":
+        try:
+            from visualpath.backends.pathway import PathwayBackend
+            return PathwayBackend()
+        except ImportError as e:
+            raise ImportError(
+                "Pathway backend requires pathway package. "
+                "Install with: pip install visualpath[pathway]"
+            ) from e
+    else:
+        raise ValueError(f"Unknown backend: {backend}. Use 'simple' or 'pathway'.")
+
+
 def process(
     video: Union[str, Path],
     extractors: Sequence[Union[str, BaseExtractor]],
     fusion: Optional[Union[str, BaseFusion]] = None,
     *,
     fps: int = DEFAULT_FPS,
+    backend: BackendType = "simple",
     on_trigger: Optional[Callable[[Trigger], None]] = None,
     on_frame: Optional[Callable[[Frame, List[Observation]], None]] = None,
 ) -> ProcessResult:
@@ -453,6 +489,7 @@ def process(
         extractors: List of extractor names or instances.
         fusion: Fusion name, instance, or None for default.
         fps: Frames per second to process.
+        backend: Execution backend ("simple" or "pathway").
         on_trigger: Callback when a trigger fires.
         on_frame: Callback for each processed frame.
 
@@ -468,6 +505,9 @@ def process(
         >>> def on_trig(t):
         ...     print(f"Trigger: {t.reason} at {t.t_start_ns/1e9:.1f}s")
         >>> vp.process("video.mp4", ["face"], on_trigger=on_trig)
+
+        >>> # Using Pathway backend
+        >>> result = vp.process("video.mp4", ["face"], backend="pathway")
     """
     # Resolve extractors
     ext_instances: List[BaseExtractor] = []
@@ -491,6 +531,7 @@ def process(
             fusion_instance = fusion
 
     # Create video source
+    vb = None
     try:
         from visualbase import VideoBase
         vb = VideoBase()
@@ -500,50 +541,87 @@ def process(
         # Fallback to OpenCV
         frames = _opencv_frames(str(video), fps)
 
-    # Process
+    # Process using backend
     result = ProcessResult()
 
+    # Get the execution backend
+    execution_backend = _get_backend(backend)
+
+    # For on_frame callback, we need to wrap with frame counting
+    frame_count = [0]
+
+    def wrapped_on_trigger(trigger: Trigger) -> None:
+        result.triggers.append(trigger)
+        if on_trigger:
+            on_trigger(trigger)
+
     try:
-        # Initialize extractors
-        for ext in ext_instances:
-            ext.initialize()
-
-        for frame in frames:
-            result.frame_count += 1
-
-            # Run extractors
-            observations: List[Observation] = []
+        if backend == "simple" and on_frame:
+            # Simple backend with on_frame callback - use inline processing
             for ext in ext_instances:
-                obs = ext.extract(frame)
-                if obs is not None:
-                    observations.append(obs)
+                ext.initialize()
 
-            # Callback
-            if on_frame:
-                on_frame(frame, observations)
+            try:
+                for frame in frames:
+                    frame_count[0] += 1
 
-            # Run fusion
-            if fusion_instance and observations:
-                for obs in observations:
-                    fusion_result = fusion_instance.update(obs)
-                    if fusion_result.should_trigger and fusion_result.trigger:
-                        result.triggers.append(fusion_result.trigger)
-                        if on_trigger:
-                            on_trigger(fusion_result.trigger)
+                    # Run extractors
+                    observations: List[Observation] = []
+                    for ext in ext_instances:
+                        obs = ext.extract(frame)
+                        if obs is not None:
+                            observations.append(obs)
+
+                    # Callback
+                    on_frame(frame, observations)
+
+                    # Run fusion
+                    if fusion_instance and observations:
+                        for obs in observations:
+                            fusion_result = fusion_instance.update(obs)
+                            if fusion_result.should_trigger and fusion_result.trigger:
+                                result.triggers.append(fusion_result.trigger)
+                                if on_trigger:
+                                    on_trigger(fusion_result.trigger)
+            finally:
+                for ext in ext_instances:
+                    ext.cleanup()
+        else:
+            # Use backend.run() for standard processing
+            # Note: Pathway backend handles initialization/cleanup internally
+            if backend == "pathway":
+                # For pathway, convert frames to list to count
+                frame_list = list(frames)
+                frame_count[0] = len(frame_list)
+                triggers = execution_backend.run(
+                    iter(frame_list),
+                    ext_instances,
+                    fusion_instance,
+                    on_trigger=wrapped_on_trigger,
+                )
+            else:
+                # Simple backend - we need to count frames
+                frame_list = list(frames)
+                frame_count[0] = len(frame_list)
+                triggers = execution_backend.run(
+                    iter(frame_list),
+                    ext_instances,
+                    fusion_instance,
+                    on_trigger=wrapped_on_trigger,
+                )
+            result.triggers = triggers
 
         # Calculate duration
+        result.frame_count = frame_count[0]
         if result.frame_count > 0:
             result.duration_sec = result.frame_count / fps
 
     finally:
-        # Cleanup
-        for ext in ext_instances:
-            ext.cleanup()
-
-        try:
-            vb.disconnect()
-        except Exception:
-            pass
+        if vb is not None:
+            try:
+                vb.disconnect()
+            except Exception:
+                pass
 
     return result
 
@@ -554,6 +632,7 @@ def run(
     fusion: Optional[Union[str, BaseFusion]] = None,
     *,
     fps: int = DEFAULT_FPS,
+    backend: BackendType = "simple",
     on_trigger: Optional[Callable[[Trigger], None]] = None,
 ) -> List[Trigger]:
     """Run a video analysis pipeline (simplified version of process).
@@ -563,6 +642,7 @@ def run(
         extractors: List of extractor names or instances.
         fusion: Fusion name, instance, or None.
         fps: Frames per second to process.
+        backend: Execution backend ("simple" or "pathway").
         on_trigger: Callback when a trigger fires.
 
     Returns:
@@ -572,10 +652,13 @@ def run(
         >>> triggers = vp.run("video.mp4", ["face", "pose"])
         >>> for t in triggers:
         ...     print(f"{t.reason}: {t.score:.2f}")
+
+        >>> # Using Pathway backend
+        >>> triggers = vp.run("video.mp4", ["face"], backend="pathway")
     """
     result = process(
         video, extractors, fusion,
-        fps=fps, on_trigger=on_trigger,
+        fps=fps, backend=backend, on_trigger=on_trigger,
     )
     return result.triggers
 

@@ -1,6 +1,6 @@
 # VisualPath - Claude Session Context
 
-> 최종 업데이트: 2026-02-02
+> 최종 업데이트: 2026-02-03
 > 상태: **구현 완료**
 
 ## 프로젝트 역할
@@ -11,6 +11,7 @@
 - Plugin discovery (entry_points 기반)
 - Observability (트레이싱, 로깅)
 - 파이프라인 실행 엔진
+- **실행 백엔드 추상화** (Simple, Pathway)
 
 ## 아키텍처 위치
 
@@ -38,6 +39,9 @@
 | `process.VenvWorker` | venv 격리 Worker | ML 의존성 충돌 해결 |
 | `plugin.discover_*` | 플러그인 검색 | entry_points 기반 |
 | `observability` | 트레이싱 | TraceLevel, Sink |
+| `backends.ExecutionBackend` | 실행 백엔드 ABC | 파이프라인 실행 추상화 |
+| `backends.SimpleBackend` | 순차 실행 | 기본 백엔드 |
+| `backends.PathwayBackend` | 스트리밍 실행 | Pathway 기반 (옵션) |
 
 ## 디렉토리 구조
 
@@ -57,7 +61,19 @@ visualpath/
 ├── plugin/
 │   └── discovery.py     # discover_extractors, discover_fusions
 ├── backends/
-│   └── protocols.py     # Backend protocols
+│   ├── protocols.py     # ML Backend protocols
+│   ├── base.py          # ExecutionBackend ABC
+│   ├── simple/          # SimpleBackend (모듈식 백엔드)
+│   │   ├── backend.py   # SimpleBackend + 팩토리 함수
+│   │   ├── scheduler.py # 프레임 스케줄링 전략
+│   │   ├── synchronizer.py  # Observation 동기화 전략
+│   │   ├── buffer.py    # 백프레셔 버퍼 전략
+│   │   └── executor.py  # Extractor 실행 전략
+│   └── pathway/         # Pathway 스트리밍 백엔드
+│       ├── backend.py   # PathwayBackend
+│       ├── connector.py # VideoConnectorSubject
+│       ├── operators.py # Extractor/Fusion UDF
+│       └── converter.py # FlowGraph → Pathway
 └── observability/
     ├── records.py       # TraceRecord types
     └── sinks.py         # Sink 구현체들
@@ -82,6 +98,61 @@ worker = launcher.create(
     isolation=IsolationLevel.VENV,
     venv_path="/opt/venv-my"
 )
+```
+
+## 실행 백엔드
+
+```python
+import visualpath as vp
+
+# 기본 Simple 백엔드 (순차 처리)
+triggers = vp.run("video.mp4", ["face"], backend="simple")
+
+# Pathway 백엔드 (스트리밍)
+# pip install visualpath[pathway] 필요
+triggers = vp.run("video.mp4", ["face"], backend="pathway")
+```
+
+### 백엔드 비교
+
+| 백엔드 | 특징 | 용도 |
+|--------|------|------|
+| **SimpleBackend** | 모듈식 컴포넌트, 순차/병렬 처리 | 로컬 비디오, 개발/디버깅, 배치 처리 |
+| **PathwayBackend** | 스트리밍, 백프레셔, 워터마크 | 실시간 처리, 복잡한 동기화 |
+
+### SimpleBackend 컴포넌트
+
+```python
+from visualpath.backends.simple import (
+    SimpleBackend,
+    # 스케줄러: 프레임 선택/드롭 전략
+    PassThroughScheduler,   # 모든 프레임 처리
+    KeyframeScheduler,      # N번째 프레임만 처리
+    AdaptiveRateScheduler,  # 목표 FPS 유지
+    # 실행기: Extractor 실행 전략
+    SequentialExecutor,     # 순차 실행
+    ThreadPoolExecutor,     # 병렬 실행
+    TimeoutExecutor,        # 타임아웃 있는 병렬 실행
+    # 동기화: Observation 정렬 전략
+    NoSyncSynchronizer,     # 즉시 전달
+    TimeWindowSync,         # 시간 윈도우 기반 그룹핑
+    BarrierSync,            # 모든 소스 대기
+)
+
+# 컴포넌트 조합
+backend = SimpleBackend(
+    scheduler=AdaptiveRateScheduler(target_fps=10),
+    executor=ThreadPoolExecutor(max_workers=4),
+    synchronizer=TimeWindowSync(window_ns=100_000_000),
+)
+
+# 또는 팩토리 함수 사용
+from visualpath.backends.simple import (
+    create_parallel_backend,
+    create_realtime_backend,
+    create_batch_backend,
+)
+backend = create_realtime_backend(target_fps=10)
 ```
 
 ## on_trigger 콜백 (비즈니스 로직은 앱에서)
@@ -110,7 +181,14 @@ uv run pytest tests/ -v
 ## 의존성
 
 - 코어: visualbase, numpy
-- 옵션: pyzmq (IPC)
+- 옵션:
+  - `pyzmq` (IPC)
+  - `pathway>=0.8.0` (스트리밍 백엔드)
+
+```bash
+# Pathway 백엔드 설치
+pip install visualpath[pathway]
+```
 
 ## 문서
 

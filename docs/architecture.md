@@ -1,6 +1,6 @@
 # VisualPath 아키텍처
 
-> 문서 작성일: 2026-02-02
+> 문서 작성일: 2026-02-03
 > 상태: 구현 완료
 
 ## 개요
@@ -70,7 +70,19 @@ visualpath/
 ├── plugin/
 │   └── discovery.py     # discover_extractors, discover_fusions
 ├── backends/
-│   └── protocols.py     # Backend protocols
+│   ├── protocols.py     # ML Backend protocols (DetectionBackend)
+│   ├── base.py          # ExecutionBackend ABC
+│   ├── simple/          # SimpleBackend (모듈식 백엔드)
+│   │   ├── backend.py   # SimpleBackend + 팩토리 함수
+│   │   ├── scheduler.py # 프레임 스케줄링 전략
+│   │   ├── synchronizer.py  # Observation 동기화 전략
+│   │   ├── buffer.py    # 백프레셔 버퍼 전략
+│   │   └── executor.py  # Extractor 실행 전략
+│   └── pathway/         # Pathway 스트리밍 백엔드
+│       ├── backend.py   # PathwayBackend
+│       ├── connector.py # VideoConnectorSubject
+│       ├── operators.py # Extractor/Fusion UDF 래퍼
+│       └── converter.py # FlowGraph → Pathway 변환
 └── observability/
     ├── records.py       # TraceRecord types
     └── sinks.py         # Sink 구현체들
@@ -261,6 +273,124 @@ hub.emit(TimingRecord(frame_id=100, component="face", processing_ms=42.3))
 hub.add_sink(FileSink("trace.jsonl"))
 hub.add_sink(ConsoleSink())
 ```
+
+---
+
+## 실행 백엔드 (ExecutionBackend)
+
+파이프라인 실행 전략을 추상화하여 다양한 백엔드를 지원합니다.
+
+### 백엔드 종류
+
+| 백엔드 | 설명 | 용도 |
+|--------|------|------|
+| **SimpleBackend** | 순차 처리 (기본) | 로컬 비디오, 개발/디버깅 |
+| **PathwayBackend** | Pathway 스트리밍 | 실시간 처리, 복잡한 동기화 |
+
+### ExecutionBackend ABC
+
+```python
+from visualpath.backends import ExecutionBackend, SimpleBackend
+
+class ExecutionBackend(ABC):
+    @abstractmethod
+    def run(
+        self,
+        frames: Iterator[Frame],
+        extractors: List[BaseExtractor],
+        fusion: Optional[BaseFusion] = None,
+        on_trigger: Optional[Callable[[Trigger], None]] = None,
+    ) -> List[Trigger]:
+        """파이프라인 실행."""
+        ...
+
+    @abstractmethod
+    def run_graph(
+        self,
+        frames: Iterator[Frame],
+        graph: FlowGraph,
+        on_trigger: Optional[Callable[[FlowData], None]] = None,
+    ) -> List[FlowData]:
+        """FlowGraph 기반 실행."""
+        ...
+```
+
+### 사용법
+
+```python
+import visualpath as vp
+
+# 기본 백엔드 (SimpleBackend)
+triggers = vp.run("video.mp4", ["face"])
+
+# 백엔드 명시적 지정
+triggers = vp.run("video.mp4", ["face"], backend="simple")
+
+# Pathway 백엔드 사용
+# 설치: pip install visualpath[pathway]
+triggers = vp.run("video.mp4", ["face"], backend="pathway")
+```
+
+### PathwayBackend 설정
+
+```python
+from visualpath.backends.pathway import PathwayBackend
+
+backend = PathwayBackend(
+    window_ns=100_000_000,       # 100ms 윈도우
+    allowed_lateness_ns=50_000_000,  # 50ms 지연 허용
+    autocommit_ms=100,           # 커밋 간격
+)
+
+# 직접 백엔드 사용
+triggers = backend.run(frames, [face_ext], fusion=smile_fusion)
+```
+
+### SimpleBackend 컴포넌트
+
+SimpleBackend는 모듈식 아키텍처로 각 컴포넌트를 독립적으로 교체할 수 있습니다:
+
+| 컴포넌트 | 역할 | 구현체 |
+|----------|------|--------|
+| **Scheduler** | 프레임 선택/드롭 | PassThrough, Keyframe, SkipOldest, AdaptiveRate |
+| **Executor** | Extractor 실행 | Sequential, ThreadPool, Timeout, Adaptive |
+| **Synchronizer** | Observation 정렬 | NoSync, TimeWindow, Watermark, Barrier |
+| **Buffer** | 백프레셔 관리 | Unbounded, Bounded, SlidingWindow, Priority |
+
+```python
+from visualpath.backends.simple import (
+    SimpleBackend,
+    KeyframeScheduler,
+    ThreadPoolExecutor,
+    TimeWindowSync,
+)
+
+# 컴포넌트 조합
+backend = SimpleBackend(
+    scheduler=KeyframeScheduler(every_n=3),       # 3프레임마다 처리
+    executor=ThreadPoolExecutor(max_workers=4),   # 병렬 실행
+    synchronizer=TimeWindowSync(window_ns=100_000_000),  # 100ms 윈도우
+)
+
+# 팩토리 함수
+from visualpath.backends.simple import (
+    create_default_backend,    # 기본 순차 처리
+    create_parallel_backend,   # 병렬 처리 + 선택적 타임아웃
+    create_realtime_backend,   # 실시간 처리 최적화
+    create_batch_backend,      # 배치 처리 최적화
+)
+```
+
+### SimpleBackend vs PathwayBackend
+
+| 측면 | SimpleBackend | PathwayBackend |
+|------|---------------|----------------|
+| 아키텍처 | 모듈식 컴포넌트 조합 | 선언적 dataflow |
+| 윈도우 정렬 | TimeWindowSync (구성 가능) | TumblingWindow + watermark |
+| Late arrival | Synchronizer에서 처리 | `allowed_lateness` 처리 |
+| 백프레셔 | Buffer 컴포넌트 | Rust 엔진 내장 |
+| 병렬 처리 | ThreadPool/TimeoutExecutor | Pathway workers |
+| 확장성 | 컴포넌트 추가/교체 용이 | Pathway 연산자 사용 |
 
 ---
 
@@ -482,6 +612,8 @@ composite = CompositeMapper([FaceMapper(), DefaultObservationMapper()])
 
 ## 관련 문서
 
+- [왜 visualpath인가](./why-visualpath.md): 단순 루프에서 플랫폼이 필요해지는 과정
+- [ML 의존성 충돌과 격리](../../facemoment/docs/cuda-conflict-isolation.md): CUDA/onnxruntime 충돌 사례
 - [Stream Synchronization](./stream-synchronization.md): 스트림 동기화 아키텍처
 - visualbase/CLAUDE.md: 미디어 I/O 라이브러리
 - facemoment/CLAUDE.md: 981파크 분석 앱 (플러그인 예시)

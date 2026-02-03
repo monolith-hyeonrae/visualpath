@@ -87,11 +87,12 @@ class BaseWorker(ABC):
         ...
 
     @abstractmethod
-    def process(self, frame: "Frame") -> WorkerResult:
+    def process(self, frame: "Frame", deps: Optional[Dict[str, Observation]] = None) -> WorkerResult:
         """Process a frame and return the result.
 
         Args:
             frame: The frame to process.
+            deps: Optional dict of observations from dependent extractors.
 
         Returns:
             WorkerResult with observation or error.
@@ -131,13 +132,23 @@ class InlineWorker(BaseWorker):
         self._extractor.cleanup()
         self._running = False
 
-    def process(self, frame: "Frame") -> WorkerResult:
+    def process(self, frame: "Frame", deps: Optional[Dict[str, Observation]] = None) -> WorkerResult:
         """Process a frame inline."""
         import time
         start = time.perf_counter()
 
         try:
-            obs = self._extractor.extract(frame)
+            extractor_deps = None
+            if deps and self._extractor.depends:
+                extractor_deps = {
+                    name: deps[name]
+                    for name in self._extractor.depends
+                    if name in deps
+                }
+            try:
+                obs = self._extractor.extract(frame, extractor_deps)
+            except TypeError:
+                obs = self._extractor.extract(frame)
             elapsed_ms = (time.perf_counter() - start) * 1000
             return WorkerResult(observation=obs, timing_ms=elapsed_ms)
         except Exception as e:
@@ -187,7 +198,7 @@ class ThreadWorker(BaseWorker):
             self._executor = None
         self._extractor.cleanup()
 
-    def process(self, frame: "Frame") -> WorkerResult:
+    def process(self, frame: "Frame", deps: Optional[Dict[str, Observation]] = None) -> WorkerResult:
         """Submit frame for processing and wait for result."""
         import time
 
@@ -197,7 +208,21 @@ class ThreadWorker(BaseWorker):
         start = time.perf_counter()
 
         try:
-            future = self._executor.submit(self._extractor.extract, frame)
+            extractor_deps = None
+            if deps and self._extractor.depends:
+                extractor_deps = {
+                    name: deps[name]
+                    for name in self._extractor.depends
+                    if name in deps
+                }
+
+            def _do_extract():
+                try:
+                    return self._extractor.extract(frame, extractor_deps)
+                except TypeError:
+                    return self._extractor.extract(frame)
+
+            future = self._executor.submit(_do_extract)
             obs = future.result()  # Blocking wait
             elapsed_ms = (time.perf_counter() - start) * 1000
             return WorkerResult(observation=obs, timing_ms=elapsed_ms)
@@ -294,6 +319,73 @@ def _deserialize_observation(data: Optional[Dict[str, Any]]) -> Optional[Observa
         metadata=data.get("metadata", {}),
         timing=data.get("timing"),
     )
+
+
+def _serialize_value_safe(value: Any) -> Any:
+    """Recursively serialize a value for JSON transmission.
+
+    Args:
+        value: Any value to serialize.
+
+    Returns:
+        JSON-serializable representation.
+    """
+    import json
+
+    if value is None:
+        return None
+
+    try:
+        json.dumps(value)
+        return value
+    except (TypeError, ValueError):
+        pass
+
+    # Handle dataclasses
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            k: _serialize_value_safe(getattr(value, k))
+            for k in value.__dataclass_fields__
+        }
+
+    # Handle lists/tuples
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value_safe(item) for item in value]
+
+    # Handle dicts
+    if isinstance(value, dict):
+        return {k: _serialize_value_safe(v) for k, v in value.items()}
+
+    # Handle objects with __dict__
+    if hasattr(value, "__dict__"):
+        return repr(value)
+
+    return str(value)
+
+
+def _serialize_observation_for_deps(obs: Optional[Observation]) -> Optional[Dict[str, Any]]:
+    """Serialize an Observation for deps transmission via ZMQ.
+
+    Args:
+        obs: Observation to serialize.
+
+    Returns:
+        JSON-serializable dict, or None.
+    """
+    if obs is None:
+        return None
+
+    result: Dict[str, Any] = {
+        "source": obs.source,
+        "frame_id": obs.frame_id,
+        "t_ns": obs.t_ns,
+        "signals": obs.signals,
+        "metadata": obs.metadata,
+        "timing": obs.timing,
+    }
+    if obs.data is not None:
+        result["data"] = _serialize_value_safe(obs.data)
+    return result
 
 
 class VenvWorker(BaseWorker):
@@ -542,11 +634,12 @@ class VenvWorker(BaseWorker):
                 pass
             self._ipc_file = None
 
-    def process(self, frame: "Frame") -> WorkerResult:
+    def process(self, frame: "Frame", deps: Optional[Dict[str, Observation]] = None) -> WorkerResult:
         """Send frame to subprocess and receive observation.
 
         Args:
             frame: Frame to process.
+            deps: Optional dict of observations from dependent extractors.
 
         Returns:
             WorkerResult with observation or error.
@@ -561,17 +654,24 @@ class VenvWorker(BaseWorker):
             )
 
         if self._inline is not None:
-            return self._inline.process(frame)
+            return self._inline.process(frame, deps)
 
         import zmq
 
         try:
             # Serialize and send frame
             frame_data = _serialize_frame(frame, self._jpeg_quality)
-            self._socket.send_json({
+            message: Dict[str, Any] = {
                 "type": "extract",
                 "frame": frame_data,
-            })
+            }
+            # Include deps if provided
+            if deps:
+                message["deps"] = {
+                    name: _serialize_observation_for_deps(obs)
+                    for name, obs in deps.items()
+                }
+            self._socket.send_json(message)
 
             # Receive response
             response = self._socket.recv_json()
@@ -694,9 +794,9 @@ class ProcessWorker(BaseWorker):
         """Stop the worker process."""
         self._delegate.stop()
 
-    def process(self, frame: "Frame") -> WorkerResult:
+    def process(self, frame: "Frame", deps: Optional[Dict[str, Observation]] = None) -> WorkerResult:
         """Process a frame in the worker process."""
-        return self._delegate.process(frame)
+        return self._delegate.process(frame, deps)
 
     @property
     def is_running(self) -> bool:

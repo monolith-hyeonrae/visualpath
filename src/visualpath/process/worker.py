@@ -133,6 +133,28 @@ def _deserialize_frame(data: Dict[str, Any]) -> "Frame":
     )
 
 
+def _deserialize_observation_in_worker(data: Dict[str, Any]) -> "Observation":
+    """Deserialize an Observation from ZMQ deps message.
+
+    Args:
+        data: Dict containing serialized observation data.
+
+    Returns:
+        Reconstructed Observation object.
+    """
+    from visualpath.core.extractor import Observation
+
+    return Observation(
+        source=data["source"],
+        frame_id=data["frame_id"],
+        t_ns=data["t_ns"],
+        signals=data.get("signals", {}),
+        data=data.get("data"),
+        metadata=data.get("metadata", {}),
+        timing=data.get("timing"),
+    )
+
+
 def run_worker(extractor_name: str, ipc_address: str) -> int:
     """Run the worker process main loop.
 
@@ -195,7 +217,20 @@ def run_worker(extractor_name: str, ipc_address: str) -> int:
                 # Process frame
                 try:
                     frame = _deserialize_frame(message["frame"])
-                    observation = extractor.extract(frame)
+
+                    # Deserialize deps if present
+                    extractor_deps = None
+                    if "deps" in message and message["deps"]:
+                        extractor_deps = {}
+                        for name, obs_data in message["deps"].items():
+                            if obs_data is not None:
+                                extractor_deps[name] = _deserialize_observation_in_worker(obs_data)
+
+                    try:
+                        observation = extractor.extract(frame, extractor_deps)
+                    except TypeError:
+                        observation = extractor.extract(frame)
+
                     socket.send_json({
                         "observation": _serialize_observation(observation),
                     })
