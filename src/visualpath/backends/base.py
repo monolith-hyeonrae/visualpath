@@ -8,12 +8,13 @@ Example:
     >>> from visualpath.backends import ExecutionBackend
     >>>
     >>> class MyBackend(ExecutionBackend):
-    ...     def run(self, frames, extractors, fusion=None, on_trigger=None):
+    ...     def execute(self, frames, graph):
     ...         # Custom execution logic
     ...         ...
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Callable, Iterator, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -24,24 +25,38 @@ if TYPE_CHECKING:
     from visualpath.flow.node import FlowData
 
 
+@dataclass
+class PipelineResult:
+    """Result from executing a pipeline via ExecutionBackend.execute().
+
+    Attributes:
+        triggers: List of triggers that fired during processing.
+        frame_count: Total frames processed.
+        stats: Optional backend-specific statistics.
+    """
+
+    triggers: List["Trigger"] = field(default_factory=list)
+    frame_count: int = 0
+    stats: dict = field(default_factory=dict)
+
+
 class ExecutionBackend(ABC):
     """Abstract base class for pipeline execution backends.
 
     ExecutionBackend provides a unified interface for running video analysis
-    pipelines. Implementations handle the details of frame processing,
-    extractor execution, synchronization, and fusion.
+    pipelines. The primary method is ``execute(frames, graph)`` which takes
+    a FlowGraph defining the pipeline structure.
 
     Available backends:
-    - SimpleBackend: Sequential processing (default)
+    - SimpleBackend: Sequential processing via GraphExecutor (default)
     - PathwayBackend: Pathway streaming engine
 
     Example:
+        >>> from visualpath.flow.graph import FlowGraph
+        >>> graph = FlowGraph.from_pipeline([face_ext], fusion=smile_fusion)
         >>> backend = SimpleBackend()
-        >>> triggers = backend.run(
-        ...     frames=video.stream(),
-        ...     extractors=[face_ext, pose_ext],
-        ...     fusion=smile_fusion,
-        ... )
+        >>> result = backend.execute(frames, graph)
+        >>> print(result.triggers)
     """
 
     @property
@@ -50,6 +65,29 @@ class ExecutionBackend(ABC):
         return self.__class__.__name__
 
     @abstractmethod
+    def execute(
+        self,
+        frames: Iterator["Frame"],
+        graph: "FlowGraph",
+    ) -> PipelineResult:
+        """Execute a FlowGraph-based pipeline.
+
+        This is the primary execution method. All backends must implement it.
+
+        Args:
+            frames: Iterator of Frame objects from video source.
+                Must not be materialized into a list.
+            graph: FlowGraph defining the processing pipeline.
+
+        Returns:
+            PipelineResult with triggers, frame_count, and optional stats.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Backward-compatible shims
+    # ------------------------------------------------------------------
+
     def run(
         self,
         frames: Iterator["Frame"],
@@ -57,62 +95,59 @@ class ExecutionBackend(ABC):
         fusion: Optional["BaseFusion"] = None,
         on_trigger: Optional[Callable[["Trigger"], None]] = None,
     ) -> List["Trigger"]:
-        """Run the pipeline with extractors and optional fusion.
+        """Run a simple pipeline (backward-compatible shim).
 
-        This is the primary method for simple pipeline execution.
+        Converts the extractor/fusion arguments to a FlowGraph and
+        delegates to ``execute()``.
 
         Args:
-            frames: Iterator of Frame objects from video source.
+            frames: Iterator of Frame objects.
             extractors: List of extractors to run on each frame.
             fusion: Optional fusion module for trigger decisions.
             on_trigger: Optional callback invoked when a trigger fires.
 
         Returns:
             List of all triggers that fired during processing.
-
-        Example:
-            >>> triggers = backend.run(
-            ...     frames=video.stream(fps=10),
-            ...     extractors=[face_ext],
-            ...     fusion=smile_fusion,
-            ...     on_trigger=lambda t: print(f"Trigger: {t.label}"),
-            ... )
         """
-        ...
+        from visualpath.flow.graph import FlowGraph
 
-    @abstractmethod
+        graph = FlowGraph.from_pipeline(extractors, fusion)
+        if on_trigger:
+            original_callback = on_trigger
+
+            def _trigger_callback(data: "FlowData") -> None:
+                for result in data.results:
+                    if result.should_trigger and result.trigger:
+                        original_callback(result.trigger)
+
+            graph.on_trigger(_trigger_callback)
+
+        result = self.execute(frames, graph)
+        return result.triggers
+
     def run_graph(
         self,
         frames: Iterator["Frame"],
         graph: "FlowGraph",
         on_trigger: Optional[Callable[["FlowData"], None]] = None,
     ) -> List["FlowData"]:
-        """Run the pipeline using a FlowGraph.
+        """Run a FlowGraph pipeline (backward-compatible shim).
 
-        This method supports complex DAG-based pipelines with branching,
-        joining, and multi-path processing.
+        Delegates to ``execute()`` and returns an empty list to match
+        the previous return type.
 
         Args:
-            frames: Iterator of Frame objects from video source.
+            frames: Iterator of Frame objects.
             graph: FlowGraph defining the processing pipeline.
-            on_trigger: Optional callback invoked when data reaches
-                terminal nodes with should_trigger=True.
+            on_trigger: Optional callback for trigger events.
 
         Returns:
-            List of FlowData that reached terminal nodes.
-
-        Example:
-            >>> graph = FlowGraphBuilder()
-            ...     .source("frames")
-            ...     .fanout(["face", "pose"])
-            ...     .path("face", extractors=[face_ext])
-            ...     .path("pose", extractors=[pose_ext])
-            ...     .join(["face", "pose"])
-            ...     .build()
-            >>>
-            >>> results = backend.run_graph(frames, graph)
+            Empty list (for backward compatibility).
         """
-        ...
+        if on_trigger:
+            graph.on_trigger(on_trigger)
+        self.execute(frames, graph)
+        return []
 
 
-__all__ = ["ExecutionBackend"]
+__all__ = ["ExecutionBackend", "PipelineResult"]

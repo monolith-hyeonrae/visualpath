@@ -5,45 +5,24 @@ This module provides:
 - Execution backends (ExecutionBackend, SimpleBackend, PathwayBackend)
 
 Execution backends control how the pipeline processes frames:
-- SimpleBackend: Modular backend with composable components
+- SimpleBackend: GraphExecutor-based sequential processing
 - PathwayBackend: Pathway streaming engine with backpressure
-
-SimpleBackend Components:
-- Scheduler: Frame selection/dropping strategy
-- Executor: Extractor execution strategy
-- Synchronizer: Observation alignment
-- Buffer: Backpressure management
 
 Example:
     >>> from visualpath.backends import SimpleBackend
+    >>> from visualpath.flow.graph import FlowGraph
     >>>
-    >>> # Default backend
+    >>> graph = FlowGraph.from_pipeline([face_ext], fusion=smile_fusion)
     >>> backend = SimpleBackend()
-    >>> triggers = backend.run(frames, extractors=[face_ext])
-    >>>
-    >>> # Customized backend
-    >>> from visualpath.backends.simple import (
-    ...     ThreadPoolExecutor,
-    ...     TimeWindowSync,
-    ... )
-    >>> backend = SimpleBackend(
-    ...     executor=ThreadPoolExecutor(max_workers=4),
-    ...     synchronizer=TimeWindowSync(window_ns=100_000_000),
-    ... )
+    >>> result = backend.execute(frames, graph)
 """
 
 from visualpath.backends.protocols import (
     DetectionBackend,
     DetectionResult,
 )
-from visualpath.backends.base import ExecutionBackend
-from visualpath.backends.simple import (
-    SimpleBackend,
-    create_default_backend,
-    create_parallel_backend,
-    create_realtime_backend,
-    create_batch_backend,
-)
+from visualpath.backends.base import ExecutionBackend, PipelineResult
+from visualpath.backends.simple import SimpleBackend
 
 __all__ = [
     # ML backend protocols
@@ -51,12 +30,8 @@ __all__ = [
     "DetectionResult",
     # Execution backends
     "ExecutionBackend",
+    "PipelineResult",
     "SimpleBackend",
-    # Factory functions
-    "create_default_backend",
-    "create_parallel_backend",
-    "create_realtime_backend",
-    "create_batch_backend",
 ]
 
 # Conditionally export PathwayBackend if available

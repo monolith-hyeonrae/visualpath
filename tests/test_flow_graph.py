@@ -669,6 +669,57 @@ class TestFlowIntegration:
         assert ext_human._extract_count == 2
         assert ext_scene._extract_count == 2
 
+    def test_from_pipeline_basic(self):
+        """Test FlowGraph.from_pipeline() creates correct graph."""
+        ext = CountingExtractor("ext1", return_value=0.7)
+
+        graph = FlowGraph.from_pipeline([ext])
+
+        assert "source" in graph.nodes
+        assert "pipeline" in graph.nodes
+        assert graph.entry_node == "source"
+        assert len(graph.edges) == 1
+        assert graph.edges[0].source == "source"
+        assert graph.edges[0].target == "pipeline"
+
+    def test_from_pipeline_with_fusion(self):
+        """Test FlowGraph.from_pipeline() with fusion."""
+        ext = CountingExtractor("ext1", return_value=0.7)
+        fusion = ThresholdFusion(threshold=0.5)
+
+        graph = FlowGraph.from_pipeline([ext], fusion=fusion)
+
+        assert "source" in graph.nodes
+        assert "pipeline" in graph.nodes
+
+    def test_from_pipeline_with_on_trigger(self):
+        """Test FlowGraph.from_pipeline() with on_trigger callback."""
+        ext = CountingExtractor("ext1", return_value=0.7)
+        triggered = []
+
+        graph = FlowGraph.from_pipeline(
+            [ext],
+            on_trigger=lambda d: triggered.append(d),
+        )
+
+        # Fire a trigger to verify callback was registered
+        result = FusionResult(should_trigger=True, score=0.9)
+        data = FlowData(results=[result])
+        graph.fire_triggers(data)
+
+        assert len(triggered) == 1
+
+    def test_from_pipeline_multiple_extractors(self):
+        """Test FlowGraph.from_pipeline() with multiple extractors."""
+        ext1 = CountingExtractor("ext1", return_value=0.3)
+        ext2 = CountingExtractor("ext2", return_value=0.7)
+
+        graph = FlowGraph.from_pipeline([ext1, ext2])
+
+        assert "source" in graph.nodes
+        assert "pipeline" in graph.nodes
+        assert len(graph.edges) == 1
+
     def test_parallel_paths_with_join(self):
         """Test parallel processing paths that join."""
         ext_a = CountingExtractor("ext_a", return_value=0.3)
@@ -695,3 +746,63 @@ class TestFlowIntegration:
         # Should have merged observations
         assert len(results) == 1
         assert len(results[0].observations) == 2
+
+
+# =============================================================================
+# Visualization Tests
+# =============================================================================
+
+
+class TestFlowGraphVisualization:
+    """Tests for FlowGraph visualization methods."""
+
+    def test_to_dot_simple(self):
+        """Test DOT output for a simple pipeline."""
+        ext = CountingExtractor("test")
+        graph = FlowGraph.from_pipeline([ext])
+        dot = graph.to_dot()
+
+        assert 'digraph' in dot
+        assert '"source"' in dot
+        assert '"pipeline"' in dot
+        assert '"source" -> "pipeline"' in dot
+
+    def test_to_dot_with_branch(self):
+        """Test DOT output with branching and path filters."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("source"))
+        graph.add_node(BranchNode("branch", condition=lambda d: True, if_true="yes", if_false="no"))
+        graph.add_node(FilterNode("filter_a", condition=lambda d: True))
+        graph.add_edge("source", "branch")
+        graph.add_edge("branch", "filter_a", path_filter="yes")
+
+        dot = graph.to_dot(title="Test")
+        assert 'digraph "Test"' in dot
+        assert '"yes"' in dot  # path_filter label on edge
+        # BranchNode should use triangle shape
+        assert 'triangle' in dot
+
+    def test_to_dot_node_styles(self):
+        """Test that different node types get different shapes."""
+        graph = FlowGraph()
+        graph.add_node(SourceNode("src"))
+        graph.add_node(SamplerNode("samp"))
+        graph.add_node(JoinNode("join", input_paths=["a"]))
+        graph.add_edge("src", "samp")
+        graph.add_edge("samp", "join")
+
+        dot = graph.to_dot()
+        assert 'circle' in dot    # SourceNode
+        assert 'diamond' in dot   # SamplerNode
+        assert 'invtriangle' in dot  # JoinNode
+
+    def test_print_ascii(self):
+        """Test ASCII output for a simple pipeline."""
+        ext = CountingExtractor("test")
+        graph = FlowGraph.from_pipeline([ext])
+        ascii_repr = graph.print_ascii()
+
+        assert "source" in ascii_repr
+        assert "pipeline" in ascii_repr
+        assert "SourceNode" in ascii_repr
+        assert "PathNode" in ascii_repr

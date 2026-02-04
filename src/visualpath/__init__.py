@@ -5,8 +5,8 @@ visualpath provides a plugin-based platform for building video analysis pipeline
 Quick Start:
     >>> import visualpath as vp
     >>>
-    >>> # Process a video (one-liner)
-    >>> triggers = vp.run("video.mp4", extractors=["face", "pose"])
+    >>> # Process a video
+    >>> result = vp.process_video("video.mp4", extractors=["face", "pose"])
     >>>
     >>> # Create a custom extractor (decorator)
     >>> @vp.extractor("brightness")
@@ -43,17 +43,20 @@ from visualpath.api import (
     extractor,
     fusion,
     trigger,
-    # Pipeline
-    process,
-    run,
     # Registry
     get_extractor,
     get_fusion,
     list_extractors,
     list_fusions,
     # Types
-    ProcessResult,
     TriggerSpec,
+)
+
+# Pipeline runner (from runner.py)
+from visualpath.runner import (
+    process_video,
+    run,
+    ProcessResult,
 )
 
 # =============================================================================
@@ -74,7 +77,7 @@ __all__ = [
     "extractor",
     "fusion",
     "trigger",
-    "process",
+    "process_video",
     "run",
     "get_extractor",
     "get_fusion",

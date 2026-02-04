@@ -8,7 +8,7 @@ Quick Start:
     >>> import visualpath as vp
     >>>
     >>> # Process a video with built-in extractors
-    >>> clips = vp.process("video.mp4", extractors=["face", "pose"])
+    >>> result = vp.process_video("video.mp4", extractors=["face", "pose"])
     >>>
     >>> # Define a custom extractor
     >>> @vp.extractor("brightness")
@@ -27,27 +27,18 @@ Quick Start:
 """
 
 from dataclasses import dataclass, field
-from functools import wraps
-from pathlib import Path
 from typing import (
     Any,
     Callable,
     Dict,
     List,
-    Literal,
     Optional,
-    Union,
-    Sequence,
-    Iterator,
 )
 
 from visualbase import Frame, Trigger
 
 from visualpath.core.extractor import BaseExtractor, Observation
 from visualpath.core.fusion import BaseFusion, FusionResult
-
-# Backend type alias
-BackendType = Literal["simple", "pathway"]
 
 
 # =============================================================================
@@ -229,17 +220,6 @@ def extractor(
         >>> def check_quality(frame):
         ...     blur = cv2.Laplacian(frame.data, cv2.CV_64F).var()
         ...     return {"blur_score": blur, "is_sharp": blur > 100}
-
-        >>> # With init/cleanup
-        >>> model = None
-        >>>
-        >>> def load_model():
-        ...     global model
-        ...     model = load_my_model()
-        >>>
-        >>> @vp.extractor("detector", init=load_model)
-        >>> def detect(frame):
-        ...     return {"count": model.detect(frame.data)}
     """
     def decorator(fn: ExtractFn) -> FunctionExtractor:
         ext = FunctionExtractor(name, fn, init_fn=init, cleanup_fn=cleanup)
@@ -428,278 +408,6 @@ def fusion(
 
 
 # =============================================================================
-# Pipeline Runner
-# =============================================================================
-
-@dataclass
-class ProcessResult:
-    """Result from processing a video."""
-    triggers: List[Trigger] = field(default_factory=list)
-    frame_count: int = 0
-    duration_sec: float = 0.0
-
-
-def _get_backend(backend: BackendType) -> "ExecutionBackend":
-    """Get execution backend by name.
-
-    Args:
-        backend: Backend name ("simple" or "pathway").
-
-    Returns:
-        ExecutionBackend instance.
-
-    Raises:
-        ValueError: If backend is unknown.
-        ImportError: If Pathway is requested but not installed.
-    """
-    from visualpath.backends.base import ExecutionBackend
-
-    if backend == "simple":
-        from visualpath.backends.simple import SimpleBackend
-        return SimpleBackend()
-    elif backend == "pathway":
-        try:
-            from visualpath.backends.pathway import PathwayBackend
-            return PathwayBackend()
-        except ImportError as e:
-            raise ImportError(
-                "Pathway backend requires pathway package. "
-                "Install with: pip install visualpath[pathway]"
-            ) from e
-    else:
-        raise ValueError(f"Unknown backend: {backend}. Use 'simple' or 'pathway'.")
-
-
-def process(
-    video: Union[str, Path],
-    extractors: Sequence[Union[str, BaseExtractor]],
-    fusion: Optional[Union[str, BaseFusion]] = None,
-    *,
-    fps: int = DEFAULT_FPS,
-    backend: BackendType = "simple",
-    on_trigger: Optional[Callable[[Trigger], None]] = None,
-    on_frame: Optional[Callable[[Frame, List[Observation]], None]] = None,
-) -> ProcessResult:
-    """Process a video with the specified extractors and fusion.
-
-    This is the main entry point for simple video processing.
-
-    Args:
-        video: Path to video file.
-        extractors: List of extractor names or instances.
-        fusion: Fusion name, instance, or None for default.
-        fps: Frames per second to process.
-        backend: Execution backend ("simple" or "pathway").
-        on_trigger: Callback when a trigger fires.
-        on_frame: Callback for each processed frame.
-
-    Returns:
-        ProcessResult with triggers and statistics.
-
-    Example:
-        >>> # Simple usage
-        >>> result = vp.process("video.mp4", extractors=["face"])
-        >>> print(f"Found {len(result.triggers)} highlights")
-
-        >>> # With callback
-        >>> def on_trig(t):
-        ...     print(f"Trigger: {t.reason} at {t.t_start_ns/1e9:.1f}s")
-        >>> vp.process("video.mp4", ["face"], on_trigger=on_trig)
-
-        >>> # Using Pathway backend
-        >>> result = vp.process("video.mp4", ["face"], backend="pathway")
-    """
-    # Resolve extractors
-    ext_instances: List[BaseExtractor] = []
-    for ext in extractors:
-        if isinstance(ext, str):
-            instance = get_extractor(ext)
-            if instance is None:
-                raise ValueError(f"Unknown extractor: {ext}")
-            ext_instances.append(instance)
-        else:
-            ext_instances.append(ext)
-
-    # Resolve fusion
-    fusion_instance: Optional[BaseFusion] = None
-    if fusion is not None:
-        if isinstance(fusion, str):
-            fusion_instance = get_fusion(fusion)
-            if fusion_instance is None:
-                raise ValueError(f"Unknown fusion: {fusion}")
-        else:
-            fusion_instance = fusion
-
-    # Create video source
-    vb = None
-    try:
-        from visualbase import VideoBase
-        vb = VideoBase()
-        source = vb.open(str(video))
-        frames = source.stream(fps=fps)
-    except Exception:
-        # Fallback to OpenCV
-        frames = _opencv_frames(str(video), fps)
-
-    # Process using backend
-    result = ProcessResult()
-
-    # Get the execution backend
-    execution_backend = _get_backend(backend)
-
-    # For on_frame callback, we need to wrap with frame counting
-    frame_count = [0]
-
-    def wrapped_on_trigger(trigger: Trigger) -> None:
-        result.triggers.append(trigger)
-        if on_trigger:
-            on_trigger(trigger)
-
-    try:
-        if backend == "simple" and on_frame:
-            # Simple backend with on_frame callback - use inline processing
-            for ext in ext_instances:
-                ext.initialize()
-
-            try:
-                for frame in frames:
-                    frame_count[0] += 1
-
-                    # Run extractors
-                    observations: List[Observation] = []
-                    for ext in ext_instances:
-                        obs = ext.extract(frame)
-                        if obs is not None:
-                            observations.append(obs)
-
-                    # Callback
-                    on_frame(frame, observations)
-
-                    # Run fusion
-                    if fusion_instance and observations:
-                        for obs in observations:
-                            fusion_result = fusion_instance.update(obs)
-                            if fusion_result.should_trigger and fusion_result.trigger:
-                                result.triggers.append(fusion_result.trigger)
-                                if on_trigger:
-                                    on_trigger(fusion_result.trigger)
-            finally:
-                for ext in ext_instances:
-                    ext.cleanup()
-        else:
-            # Use backend.run() for standard processing
-            # Note: Pathway backend handles initialization/cleanup internally
-            if backend == "pathway":
-                # For pathway, convert frames to list to count
-                frame_list = list(frames)
-                frame_count[0] = len(frame_list)
-                triggers = execution_backend.run(
-                    iter(frame_list),
-                    ext_instances,
-                    fusion_instance,
-                    on_trigger=wrapped_on_trigger,
-                )
-            else:
-                # Simple backend - we need to count frames
-                frame_list = list(frames)
-                frame_count[0] = len(frame_list)
-                triggers = execution_backend.run(
-                    iter(frame_list),
-                    ext_instances,
-                    fusion_instance,
-                    on_trigger=wrapped_on_trigger,
-                )
-            result.triggers = triggers
-
-        # Calculate duration
-        result.frame_count = frame_count[0]
-        if result.frame_count > 0:
-            result.duration_sec = result.frame_count / fps
-
-    finally:
-        if vb is not None:
-            try:
-                vb.disconnect()
-            except Exception:
-                pass
-
-    return result
-
-
-def run(
-    video: Union[str, Path],
-    extractors: Sequence[Union[str, BaseExtractor]],
-    fusion: Optional[Union[str, BaseFusion]] = None,
-    *,
-    fps: int = DEFAULT_FPS,
-    backend: BackendType = "simple",
-    on_trigger: Optional[Callable[[Trigger], None]] = None,
-) -> List[Trigger]:
-    """Run a video analysis pipeline (simplified version of process).
-
-    Args:
-        video: Path to video file.
-        extractors: List of extractor names or instances.
-        fusion: Fusion name, instance, or None.
-        fps: Frames per second to process.
-        backend: Execution backend ("simple" or "pathway").
-        on_trigger: Callback when a trigger fires.
-
-    Returns:
-        List of triggers found.
-
-    Example:
-        >>> triggers = vp.run("video.mp4", ["face", "pose"])
-        >>> for t in triggers:
-        ...     print(f"{t.reason}: {t.score:.2f}")
-
-        >>> # Using Pathway backend
-        >>> triggers = vp.run("video.mp4", ["face"], backend="pathway")
-    """
-    result = process(
-        video, extractors, fusion,
-        fps=fps, backend=backend, on_trigger=on_trigger,
-    )
-    return result.triggers
-
-
-def _opencv_frames(video_path: str, fps: int) -> Iterator[Frame]:
-    """Fallback frame iterator using OpenCV."""
-    import cv2
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
-
-    try:
-        src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        skip = max(1, int(src_fps / fps))
-        frame_id = 0
-        read_count = 0
-
-        while True:
-            ret, data = cap.read()
-            if not ret:
-                break
-
-            read_count += 1
-            if read_count % skip != 0:
-                continue
-
-            t_ns = int(cap.get(cv2.CAP_PROP_POS_MSEC) * 1e6)
-
-            yield Frame.from_array(
-                data,
-                frame_id=frame_id,
-                t_src_ns=t_ns,
-            )
-            frame_id += 1
-
-    finally:
-        cap.release()
-
-
-# =============================================================================
 # Exports
 # =============================================================================
 
@@ -717,13 +425,9 @@ __all__ = [
     "FunctionExtractor",
     "FunctionFusion",
     "TriggerSpec",
-    "ProcessResult",
     # Registry
     "get_extractor",
     "get_fusion",
     "list_extractors",
     "list_fusions",
-    # Pipeline
-    "process",
-    "run",
 ]

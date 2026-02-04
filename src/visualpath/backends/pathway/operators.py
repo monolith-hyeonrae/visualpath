@@ -1,22 +1,21 @@
-"""Pathway operators for extractor and fusion execution.
+"""Pathway operators for extractor execution.
 
 This module provides operator wrappers that integrate visualpath's
-extractors and fusions with Pathway's streaming operators.
+extractors with Pathway's streaming operators.
 
-Pure Python functions (create_extractor_udf, create_multi_extractor_udf,
-create_fusion_state_handler) can be used independently.
+Pure Python functions (create_extractor_udf, create_multi_extractor_udf)
+can be used independently.
 
 Pathway-specific functions (apply_extractors) require Pathway installed
 and operate on pw.Table with PyObjectWrapper columns.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from visualbase import Frame, Trigger
+    from visualbase import Frame
     from visualpath.core.extractor import BaseExtractor, Observation
-    from visualpath.core.fusion import BaseFusion, FusionResult
 
 try:
     import pathway as pw
@@ -39,18 +38,6 @@ class ExtractorResult:
     t_ns: int
     source: str
     observation: Optional["Observation"]
-
-
-@dataclass
-class FusionState:
-    """State container for stateful fusion in Pathway.
-
-    Attributes:
-        fusion: The fusion instance.
-        last_observations: Latest observation from each source.
-    """
-    fusion: "BaseFusion"
-    last_observations: Dict[str, "Observation"]
 
 
 def create_extractor_udf(
@@ -76,7 +63,6 @@ def create_extractor_udf(
                     for name in extractor.depends
                     if name in deps
                 }
-                # Composite "face" extractor satisfies "face_detect" dependency
                 if "face_detect" in extractor.depends and "face_detect" not in extractor_deps and "face" in deps:
                     extractor_deps["face"] = deps["face"]
             try:
@@ -93,38 +79,6 @@ def create_extractor_udf(
             return []
 
     return extract_fn
-
-
-def create_fusion_state_handler(fusion: "BaseFusion"):
-    """Create a stateful handler for fusion.
-
-    The handler maintains fusion state across observations and
-    produces triggers when fusion.update() returns should_trigger=True.
-
-    Args:
-        fusion: The fusion instance.
-
-    Returns:
-        A tuple of (initial_state_fn, update_fn).
-    """
-    def init_state() -> FusionState:
-        """Initialize fusion state."""
-        return FusionState(
-            fusion=fusion,
-            last_observations={},
-        )
-
-    def update_state(
-        state: FusionState,
-        observation: "Observation",
-    ) -> Tuple[FusionState, Optional["Trigger"]]:
-        """Update fusion state with new observation."""
-        state.last_observations[observation.source] = observation
-        result = state.fusion.update(observation)
-        trigger = result.trigger if result.should_trigger else None
-        return (state, trigger)
-
-    return init_state, update_state
 
 
 def create_multi_extractor_udf(extractors: List["BaseExtractor"]):
@@ -153,7 +107,6 @@ def create_multi_extractor_udf(extractors: List["BaseExtractor"]):
                         for name in extractor.depends
                         if name in deps
                     }
-                    # Composite "face" extractor satisfies "face_detect" dependency
                     if "face_detect" in extractor.depends and "face_detect" not in extractor_deps and "face" in deps:
                         extractor_deps["face"] = deps["face"]
                 try:
@@ -211,9 +164,7 @@ if PATHWAY_AVAILABLE:
 
 __all__ = [
     "ExtractorResult",
-    "FusionState",
     "create_extractor_udf",
-    "create_fusion_state_handler",
     "create_multi_extractor_udf",
 ]
 
