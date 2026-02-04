@@ -96,6 +96,20 @@ class JoinNode(FlowNode):
         """Get the expected input paths."""
         return set(self._input_paths)
 
+    @property
+    def spec(self):
+        """Return JoinSpec for this node."""
+        from visualpath.flow.specs import JoinSpec
+        return JoinSpec(
+            input_paths=tuple(sorted(self._input_paths)),
+            mode=self._mode,
+            window_ns=self._window_ns,
+            lateness_ns=0,
+            merge_observations=self._merge_observations,
+            merge_results=self._merge_results,
+            output_path_id=self._output_path_id,
+        )
+
     def _quantize_timestamp(self, timestamp_ns: int) -> int:
         """Quantize timestamp to window boundary."""
         if self._window_ns <= 0:
@@ -247,6 +261,12 @@ class CascadeFusionNode(FlowNode):
         """Get the node name."""
         return self._name
 
+    @property
+    def spec(self):
+        """Return CascadeFusionSpec for this node."""
+        from visualpath.flow.specs import CascadeFusionSpec
+        return CascadeFusionSpec(fusion_fn=self._fusion_fn)
+
     def process(self, data: FlowData) -> List[FlowData]:
         """Apply fusion function to data.
 
@@ -298,6 +318,16 @@ class CollectorNode(FlowNode):
     def name(self) -> str:
         """Get the node name."""
         return self._name
+
+    @property
+    def spec(self):
+        """Return CollectorSpec for this node."""
+        from visualpath.flow.specs import CollectorSpec
+        return CollectorSpec(
+            batch_size=self._batch_size,
+            timeout_ns=self._timeout_ns,
+            emit_partial=self._emit_partial,
+        )
 
     def process(self, data: FlowData) -> List[FlowData]:
         """Collect data into batch.

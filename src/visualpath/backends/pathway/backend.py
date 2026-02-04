@@ -9,24 +9,23 @@ analysis pipelines, enabling:
 
 Example:
     >>> from visualpath.backends.pathway import PathwayBackend
+    >>> from visualpath.flow.graph import FlowGraph
     >>>
+    >>> graph = FlowGraph.from_pipeline([face_ext], fusion=smile_fusion)
     >>> backend = PathwayBackend()
-    >>> triggers = backend.run(frames, extractors=[face_ext])
+    >>> result = backend.execute(frames, graph)
 """
 
-import time
+import time as _time_mod
 import uuid
-from typing import Callable, Iterator, List, Optional, TYPE_CHECKING
+from typing import Iterator, TYPE_CHECKING
 
-from visualpath.backends.base import ExecutionBackend
+from visualpath.backends.base import ExecutionBackend, PipelineResult
 from visualpath.backends.pathway.stats import PathwayStats
 
 if TYPE_CHECKING:
-    from visualbase import Frame, Trigger
-    from visualpath.core.extractor import BaseExtractor, Observation
-    from visualpath.core.fusion import BaseFusion
+    from visualbase import Frame
     from visualpath.flow.graph import FlowGraph
-    from visualpath.flow.node import FlowData
 
 try:
     import pathway as pw
@@ -47,7 +46,8 @@ class PathwayBackend(ExecutionBackend):
     """Pathway streaming execution backend.
 
     PathwayBackend uses Pathway's Rust-based streaming engine to process
-    video frames. This provides several advantages over SimpleBackend:
+    video frames through a FlowGraph. This provides several advantages
+    over SimpleBackend:
 
     1. **Event-time Windows**: Uses source timestamps (t_src_ns) rather
        than processing time for accurate synchronization.
@@ -74,16 +74,8 @@ class PathwayBackend(ExecutionBackend):
         ...     window_ns=100_000_000,  # 100ms
         ...     allowed_lateness_ns=50_000_000,  # 50ms
         ... )
-        >>> triggers = backend.run(
-        ...     frames=video.stream(),
-        ...     extractors=[face_ext, pose_ext],
-        ...     fusion=expression_fusion,
-        ... )
-
-    Note:
-        Pathway runs in a separate thread and processes frames
-        asynchronously. The run() method blocks until all frames
-        are processed.
+        >>> graph = FlowGraph.from_pipeline([face_ext], fusion=expr_fusion)
+        >>> result = backend.execute(frames, graph)
     """
 
     def __init__(
@@ -136,53 +128,37 @@ class PathwayBackend(ExecutionBackend):
         """
         return self._stats.to_dict()
 
-    def run(
+    def execute(
         self,
         frames: Iterator["Frame"],
-        extractors: List["BaseExtractor"],
-        fusion: Optional["BaseFusion"] = None,
-        on_trigger: Optional[Callable[["Trigger"], None]] = None,
-        on_frame_result: Optional[Callable] = None,
-    ) -> List["Trigger"]:
-        """Run the pipeline using Pathway streaming.
+        graph: "FlowGraph",
+    ) -> PipelineResult:
+        """Execute a FlowGraph-based pipeline using Pathway streaming.
 
         This method:
-        1. Creates a VideoConnectorSubject from the frame iterator
-        2. Builds a Pathway dataflow: frame -> @pw.udf extractors -> observations
-        3. If fusion is provided, applies fusion in the subscribe callback
-        4. Runs the Pathway Rust engine until all frames are processed
-
-        All Frame and Observation objects are wrapped in pw.PyObjectWrapper
-        for transport through the Pathway engine.
+        1. Creates an _InstrumentedConnectorSubject from the frame iterator
+        2. Converts the FlowGraph to a Pathway dataflow via FlowGraphConverter
+        3. Subscribes to output for trigger collection
+        4. Runs the Pathway engine until all frames are processed
 
         Args:
-            frames: Iterator of Frame objects.
-            extractors: List of extractors to run.
-            fusion: Optional fusion module.
-            on_trigger: Optional trigger callback.
-            on_frame_result: Optional per-frame callback receiving
-                (frame, observations_list, fusion_result_or_None).
-                When provided, the original frame is passed through
-                the dataflow so callers can access it in the output.
+            frames: Iterator of Frame objects (consumed lazily by Pathway).
+            graph: FlowGraph defining the processing pipeline.
 
         Returns:
-            List of triggers that fired.
+            PipelineResult with triggers, frame_count, and stats.
         """
         _check_pathway()
 
-        from visualpath.backends.pathway.connector import (
-            VideoConnectorSubject,
-            FrameSchema,
-        )
-        from visualpath.backends.pathway.operators import (
-            create_multi_extractor_udf,
-        )
+        from visualpath.backends.pathway.connector import FrameSchema
+        from visualpath.backends.pathway.converter import FlowGraphConverter
 
         # Reset stats for this run
         self._stats.reset()
-
-        triggers: List["Trigger"] = []
         stats = self._stats
+
+        triggers = []
+        frame_count_holder = [0]
 
         # Emit SessionStartRecord via ObservabilityHub
         hub = self._get_hub()
@@ -191,7 +167,7 @@ class PathwayBackend(ExecutionBackend):
             from visualpath.observability.records import SessionStartRecord
             hub.emit(SessionStartRecord(
                 session_id=session_id,
-                extractors=[ext.name for ext in extractors],
+                extractors=[],  # Graph-based: extractors embedded in nodes
                 config={
                     "backend": "pathway",
                     "window_ns": self._window_ns,
@@ -200,214 +176,90 @@ class PathwayBackend(ExecutionBackend):
                 },
             ))
 
-        # Initialize extractors
-        for ext in extractors:
-            ext.initialize()
+        # Collect fusion from graph's PathNodes for subscribe callback
+        fusion = self._find_fusion(graph)
 
-        try:
-            # 1. Create frame source via instrumented ConnectorSubject
-            subject = _InstrumentedConnectorSubject(frames, stats)
-            frames_table = pw.io.python.read(
-                subject,
-                schema=FrameSchema,
-                autocommit_duration_ms=self._autocommit_ms,
-            )
-
-            # 2. Build extractor UDF with per-extractor timing
-            raw_udf = create_multi_extractor_udf(extractors)
-
-            @pw.udf
-            def extract_all(frame_wrapped: pw.PyObjectWrapper) -> pw.PyObjectWrapper:
-                """Run all extractors on a frame through Pathway engine."""
-                frame = frame_wrapped.value
-                t0 = time.perf_counter()
-                results = raw_udf(frame)
-                elapsed_total_ms = (time.perf_counter() - t0) * 1000
-
-                # Record per-extractor stats
-                for r in results:
-                    stats.record_extraction(
-                        r.source,
-                        elapsed_total_ms / max(len(results), 1),
-                        success=(r.observation is not None),
-                    )
-                stats.record_frame_extracted()
-
-                # Emit per-frame TimingRecord if hub enabled
-                if hub.enabled:
-                    from visualpath.observability.records import TimingRecord
-                    hub.emit(TimingRecord(
-                        frame_id=frame.frame_id,
-                        component="pathway_udf",
-                        processing_ms=elapsed_total_ms,
-                        is_slow=elapsed_total_ms > 50.0,
-                    ))
-
-                return pw.PyObjectWrapper(results)
-
-            # 3. Apply extractors as Pathway UDF
-            # Include frame passthrough when on_frame_result callback is provided
-            if on_frame_result is not None:
-                obs_table = frames_table.select(
-                    frame_id=pw.this.frame_id,
-                    t_ns=pw.this.t_ns,
-                    frame=pw.this.frame,
-                    observations=extract_all(pw.this.frame),
-                )
-            else:
-                obs_table = frames_table.select(
-                    frame_id=pw.this.frame_id,
-                    t_ns=pw.this.t_ns,
-                    observations=extract_all(pw.this.frame),
-                )
-
-            # 4. Subscribe to output - apply fusion in callback
-            if fusion is not None:
-                def on_change(key, row, time, is_addition):
-                    if not is_addition:
-                        return
-                    stats.record_observation_output()
-                    obs_results = row["observations"].value
-                    obs_list = [
-                        r.observation for r in obs_results
-                        if r.observation is not None
-                    ]
-                    last_fusion_result = None
-                    for obs in obs_list:
-                        result = fusion.update(obs)
-                        last_fusion_result = result
-                        if result.should_trigger and result.trigger:
-                            stats.record_trigger()
-                            triggers.append(result.trigger)
-                            if on_trigger:
-                                on_trigger(result.trigger)
-                    if on_frame_result is not None:
-                        frame = row["frame"].value
-                        on_frame_result(frame, obs_list, last_fusion_result)
-
-                pw.io.subscribe(obs_table, on_change=on_change)
-            else:
-                def on_change_noop(key, row, time, is_addition):
-                    if not is_addition:
-                        return
-                    stats.record_observation_output()
-                    if on_frame_result is not None:
-                        frame = row["frame"].value
-                        obs_results = row["observations"].value
-                        obs_list = [
-                            r.observation for r in obs_results
-                            if r.observation is not None
-                        ]
-                        on_frame_result(frame, obs_list, None)
-
-                pw.io.subscribe(obs_table, on_change=on_change_noop)
-
-            # 5. Run the Pathway Rust engine
-            stats.mark_pipeline_start()
-            pw.run()
-            stats.mark_pipeline_end()
-
-        finally:
-            for ext in extractors:
-                ext.cleanup()
-
-        # Emit SessionEndRecord
-        if hub.enabled:
-            from visualpath.observability.records import SessionEndRecord
-            hub.emit(SessionEndRecord(
-                session_id=session_id,
-                duration_sec=stats.pipeline_duration_sec,
-                total_frames=stats.frames_extracted,
-                total_triggers=stats.triggers_fired,
-                avg_fps=stats.throughput_fps,
-            ))
-
-        return triggers
-
-    def run_graph(
-        self,
-        frames: Iterator["Frame"],
-        graph: "FlowGraph",
-        on_trigger: Optional[Callable[["FlowData"], None]] = None,
-    ) -> List["FlowData"]:
-        """Run the pipeline using a FlowGraph with Pathway.
-
-        This method converts the FlowGraph to a Pathway dataflow
-        and executes it using the Pathway engine.
-
-        Args:
-            frames: Iterator of Frame objects.
-            graph: FlowGraph defining the pipeline.
-            on_trigger: Optional trigger callback.
-
-        Returns:
-            List of FlowData that reached terminal nodes.
-        """
-        _check_pathway()
-
-        from visualpath.backends.pathway.connector import (
-            VideoConnectorSubject,
-            FrameSchema,
-        )
-        from visualpath.backends.pathway.converter import FlowGraphConverter
-
-        # Reset stats for this run
-        self._stats.reset()
-        stats = self._stats
-
-        results: List["FlowData"] = []
-
-        # Initialize graph nodes
+        # Initialize graph nodes (extractors, fusions)
         graph.initialize()
 
         try:
-            # Create frame source
-            subject = _InstrumentedConnectorSubject(frames, stats)
+            # 1. Create frame source via instrumented ConnectorSubject
+            subject = _InstrumentedConnectorSubject(frames, stats, frame_count_holder)
             frames_table = pw.io.python.read(
                 subject,
                 schema=FrameSchema,
                 autocommit_duration_ms=self._autocommit_ms,
             )
 
-            # Convert FlowGraph to Pathway dataflow
+            # 2. Convert FlowGraph to Pathway dataflow
             converter = FlowGraphConverter(
                 window_ns=self._window_ns,
                 allowed_lateness_ns=self._allowed_lateness_ns,
             )
             output_table = converter.convert(graph, frames_table)
 
-            # Register output callback
+            # 3. Subscribe — collect triggers from output
             def on_output(key, row, time, is_addition):
                 if not is_addition:
                     return
-                from visualpath.flow.node import FlowData
-                frame_wrapper = row.get("frame")
-                frame_val = frame_wrapper.value if (
-                    frame_wrapper is not None
-                    and hasattr(frame_wrapper, "value")
-                ) else None
-                data = FlowData(
-                    frame=frame_val,
-                    timestamp_ns=row.get("t_ns", 0),
-                )
-                results.append(data)
-                if on_trigger is not None:
-                    results_wrapper = row.get("results")
-                    if results_wrapper is not None:
-                        result_list = (
-                            results_wrapper.value
-                            if hasattr(results_wrapper, "value")
-                            else results_wrapper
-                        )
-                        should_fire = any(
-                            r.should_trigger for r in result_list
-                        )
-                        if should_fire:
-                            on_trigger(data)
+                stats.record_observation_output()
+
+                t0 = _time_mod.perf_counter()
+
+                # Extract results from output row if available
+                results_wrapper = row.get("results")
+                if results_wrapper is not None:
+                    result_list = (
+                        results_wrapper.value
+                        if hasattr(results_wrapper, "value")
+                        else results_wrapper
+                    )
+                    if isinstance(result_list, list):
+                        frame_id_val = 0
+                        for r in result_list:
+                            # Record extraction stats
+                            if hasattr(r, "observation") and r.observation is not None:
+                                stats.record_frame_extracted()
+                                elapsed_ms = (_time_mod.perf_counter() - t0) * 1000
+                                stats.record_extraction(
+                                    r.source, elapsed_ms, success=True,
+                                )
+                                frame_id_val = r.frame_id
+                                # Run fusion on observation if available
+                                if fusion is not None:
+                                    fusion_result = fusion.update(r.observation)
+                                    if fusion_result.should_trigger and fusion_result.trigger is not None:
+                                        stats.record_trigger()
+                                        triggers.append(fusion_result.trigger)
+                                        # Fire graph trigger callbacks
+                                        from visualpath.flow.node import FlowData
+                                        trigger_data = FlowData(results=[fusion_result])
+                                        graph.fire_triggers(trigger_data)
+                            elif hasattr(r, "source"):
+                                # Extraction failed (no observation)
+                                stats.record_extraction(
+                                    r.source, 0.0, success=False,
+                                )
+
+                            # Also check for direct trigger results
+                            if hasattr(r, "should_trigger") and r.should_trigger:
+                                if hasattr(r, "trigger") and r.trigger is not None:
+                                    stats.record_trigger()
+                                    triggers.append(r.trigger)
+
+                        # Emit timing record via ObservabilityHub
+                        if hub.enabled:
+                            from visualpath.observability.records import TimingRecord
+                            elapsed_ms = (_time_mod.perf_counter() - t0) * 1000
+                            hub.emit(TimingRecord(
+                                frame_id=frame_id_val,
+                                component="pathway_udf",
+                                processing_ms=elapsed_ms,
+                            ))
 
             pw.io.subscribe(output_table, on_change=on_output)
 
-            # Run the Pathway engine
+            # 4. Run the Pathway engine
             stats.mark_pipeline_start()
             pw.run()
             stats.mark_pipeline_end()
@@ -415,7 +267,36 @@ class PathwayBackend(ExecutionBackend):
         finally:
             graph.cleanup()
 
-        return results
+        # Emit SessionEndRecord
+        if hub.enabled:
+            from visualpath.observability.records import SessionEndRecord
+            hub.emit(SessionEndRecord(
+                session_id=session_id,
+                duration_sec=stats.pipeline_duration_sec,
+                total_frames=frame_count_holder[0],
+                total_triggers=stats.triggers_fired,
+                avg_fps=stats.throughput_fps,
+            ))
+
+        return PipelineResult(
+            triggers=triggers,
+            frame_count=frame_count_holder[0],
+            stats=stats.to_dict(),
+        )
+
+    @staticmethod
+    def _find_fusion(graph: "FlowGraph"):
+        """Find fusion module from graph nodes via spec.
+
+        Returns the first fusion found, or None.
+        """
+        from visualpath.flow.specs import ExtractSpec
+
+        for node in graph.nodes.values():
+            spec = node.spec
+            if isinstance(spec, ExtractSpec) and spec.fusion is not None:
+                return spec.fusion
+        return None
 
     @staticmethod
     def _get_hub():
@@ -428,13 +309,15 @@ if PATHWAY_AVAILABLE:
     class _InstrumentedConnectorSubject(pw.io.python.ConnectorSubject):
         """ConnectorSubject that counts ingested frames."""
 
-        def __init__(self, frames: Iterator, stats: PathwayStats) -> None:
+        def __init__(self, frames: Iterator, stats: PathwayStats, frame_count_holder: list) -> None:
             super().__init__()
             self._frames = frames
             self._stats = stats
+            self._frame_count = frame_count_holder
 
         def run(self) -> None:
             for frame in self._frames:
+                self._frame_count[0] += 1
                 self._stats.record_ingestion()
                 self.next(
                     frame_id=frame.frame_id,

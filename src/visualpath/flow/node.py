@@ -21,6 +21,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from visualpath.flow.specs import NodeSpec as _NodeSpec
+
+if TYPE_CHECKING:
     from visualbase import Frame
     from visualpath.core.extractor import Observation
     from visualpath.core.fusion import FusionResult
@@ -168,6 +171,18 @@ class FlowNode(ABC):
             Single item means pass-through. Multiple items means branching.
         """
         ...
+
+    @property
+    def spec(self) -> Optional["_NodeSpec"]:
+        """Declarative spec describing this node's semantics.
+
+        Backends use the spec for optimized dispatch. If ``None``,
+        the backend falls back to calling ``process()`` directly.
+
+        Override in subclasses to return a frozen dataclass from
+        :mod:`visualpath.flow.specs`.
+        """
+        return None
 
     def initialize(self) -> None:
         """Initialize node resources.

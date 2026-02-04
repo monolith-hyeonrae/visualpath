@@ -45,6 +45,12 @@ class SamplerNode(FlowNode):
         """Get the sampling rate."""
         return self._every_nth
 
+    @property
+    def spec(self):
+        """Return SampleSpec for this node."""
+        from visualpath.flow.specs import SampleSpec
+        return SampleSpec(every_nth=self._every_nth)
+
     def reset(self) -> None:
         """Reset the frame counter."""
         self._count = 0
@@ -99,6 +105,12 @@ class RateLimiterNode(FlowNode):
     def min_interval_ms(self) -> float:
         """Get the minimum interval in milliseconds."""
         return self._min_interval_ms
+
+    @property
+    def spec(self):
+        """Return RateLimitSpec for this node."""
+        from visualpath.flow.specs import RateLimitSpec
+        return RateLimitSpec(min_interval_ms=self._min_interval_ms)
 
     def reset(self) -> None:
         """Reset the last pass time."""
@@ -157,6 +169,12 @@ class TimestampSamplerNode(FlowNode):
     def interval_ns(self) -> int:
         """Get the sampling interval in nanoseconds."""
         return self._interval_ns
+
+    @property
+    def spec(self):
+        """Return TimestampSampleSpec for this node."""
+        from visualpath.flow.specs import TimestampSampleSpec
+        return TimestampSampleSpec(interval_ns=self._interval_ns)
 
     def reset(self) -> None:
         """Reset the sampler state."""

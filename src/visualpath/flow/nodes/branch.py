@@ -53,6 +53,16 @@ class BranchNode(FlowNode):
         """Get the node name."""
         return self._name
 
+    @property
+    def spec(self):
+        """Return BranchSpec for this node."""
+        from visualpath.flow.specs import BranchSpec
+        return BranchSpec(
+            condition=self._condition,
+            if_true=self._if_true,
+            if_false=self._if_false,
+        )
+
     def process(self, data: FlowData) -> List[FlowData]:
         """Route data based on condition.
 
@@ -102,6 +112,12 @@ class FanOutNode(FlowNode):
         """Get the output paths."""
         return list(self._paths)
 
+    @property
+    def spec(self):
+        """Return FanOutSpec for this node."""
+        from visualpath.flow.specs import FanOutSpec
+        return FanOutSpec(paths=tuple(self._paths))
+
     def process(self, data: FlowData) -> List[FlowData]:
         """Replicate data to all paths.
 
@@ -149,6 +165,15 @@ class MultiBranchNode(FlowNode):
     def name(self) -> str:
         """Get the node name."""
         return self._name
+
+    @property
+    def spec(self):
+        """Return MultiBranchSpec for this node."""
+        from visualpath.flow.specs import MultiBranchSpec
+        return MultiBranchSpec(
+            branches=tuple(self._branches),
+            default=self._default,
+        )
 
     def process(self, data: FlowData) -> List[FlowData]:
         """Route data to first matching branch.
@@ -206,6 +231,12 @@ class ConditionalFanOutNode(FlowNode):
     def name(self) -> str:
         """Get the node name."""
         return self._name
+
+    @property
+    def spec(self):
+        """Return ConditionalFanOutSpec for this node."""
+        from visualpath.flow.specs import ConditionalFanOutSpec
+        return ConditionalFanOutSpec(paths=tuple(self._paths))
 
     def process(self, data: FlowData) -> List[FlowData]:
         """Replicate data to matching paths.

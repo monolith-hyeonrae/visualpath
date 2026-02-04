@@ -38,6 +38,12 @@ class SourceNode(FlowNode):
         """Get the node name."""
         return self._name
 
+    @property
+    def spec(self):
+        """Return SourceSpec for this node."""
+        from visualpath.flow.specs import SourceSpec
+        return SourceSpec(default_path_id=self._default_path_id)
+
     def process(self, data: FlowData) -> List[FlowData]:
         """Pass through existing FlowData.
 

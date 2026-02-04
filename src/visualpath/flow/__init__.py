@@ -57,6 +57,27 @@ from visualpath.flow.nodes import (
     CollectorNode,
 )
 
+# Import all spec types
+from visualpath.flow.specs import (
+    NodeSpec,
+    SourceSpec,
+    ExtractSpec,
+    FilterSpec,
+    ObservationFilterSpec,
+    SignalFilterSpec,
+    SampleSpec,
+    RateLimitSpec,
+    TimestampSampleSpec,
+    BranchSpec,
+    FanOutSpec,
+    MultiBranchSpec,
+    ConditionalFanOutSpec,
+    JoinSpec,
+    CascadeFusionSpec,
+    CollectorSpec,
+    CustomSpec,
+)
+
 __all__ = [
     # Core
     "FlowNode",
@@ -82,4 +103,22 @@ __all__ = [
     "JoinNode",
     "CascadeFusionNode",
     "CollectorNode",
+    # Specs
+    "NodeSpec",
+    "SourceSpec",
+    "ExtractSpec",
+    "FilterSpec",
+    "ObservationFilterSpec",
+    "SignalFilterSpec",
+    "SampleSpec",
+    "RateLimitSpec",
+    "TimestampSampleSpec",
+    "BranchSpec",
+    "FanOutSpec",
+    "MultiBranchSpec",
+    "ConditionalFanOutSpec",
+    "JoinSpec",
+    "CascadeFusionSpec",
+    "CollectorSpec",
+    "CustomSpec",
 ]

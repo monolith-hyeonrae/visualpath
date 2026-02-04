@@ -37,6 +37,8 @@ class PathNode(FlowNode):
         extractors: Optional[List[BaseExtractor]] = None,
         fusion: Optional[BaseFusion] = None,
         run_fusion: bool = True,
+        parallel: bool = False,
+        join_window_ns: int = 100_000_000,
     ):
         """Initialize the path node.
 
@@ -48,6 +50,10 @@ class PathNode(FlowNode):
             extractors: Extractors for auto-created Path.
             fusion: Fusion module for auto-created Path.
             run_fusion: Whether to run fusion and add results to FlowData.
+            parallel: Whether the Pathway backend should split independent
+                extractors into separate UDFs for parallel scheduling.
+            join_window_ns: Window size for auto-joining parallel extractor
+                branches in nanoseconds (default 100ms).
         """
         if path is not None:
             self._path = path
@@ -63,6 +69,8 @@ class PathNode(FlowNode):
             raise ValueError("Either 'path' or 'name' must be provided")
 
         self._run_fusion = run_fusion
+        self._parallel = parallel
+        self._join_window_ns = join_window_ns
 
     @property
     def name(self) -> str:
@@ -73,6 +81,18 @@ class PathNode(FlowNode):
     def path(self) -> Path:
         """Get the wrapped Path."""
         return self._path
+
+    @property
+    def spec(self):
+        """Return ExtractSpec for this node."""
+        from visualpath.flow.specs import ExtractSpec
+        return ExtractSpec(
+            extractors=tuple(self._path.extractors),
+            fusion=self._path.fusion,
+            parallel=self._parallel,
+            run_fusion=self._run_fusion,
+            join_window_ns=self._join_window_ns,
+        )
 
     def initialize(self) -> None:
         """Initialize the wrapped Path."""

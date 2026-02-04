@@ -37,6 +37,12 @@ class FilterNode(FlowNode):
         """Get the node name."""
         return self._name
 
+    @property
+    def spec(self):
+        """Return FilterSpec for this node."""
+        from visualpath.flow.specs import FilterSpec
+        return FilterSpec(condition=self._condition)
+
     def process(self, data: FlowData) -> List[FlowData]:
         """Filter data based on condition.
 
@@ -72,6 +78,12 @@ class ObservationFilter(FlowNode):
     def name(self) -> str:
         """Get the node name."""
         return self._name
+
+    @property
+    def spec(self):
+        """Return ObservationFilterSpec for this node."""
+        from visualpath.flow.specs import ObservationFilterSpec
+        return ObservationFilterSpec(min_count=self._min_count)
 
     def process(self, data: FlowData) -> List[FlowData]:
         """Filter based on observation count.
@@ -117,6 +129,16 @@ class SignalThresholdFilter(FlowNode):
     def name(self) -> str:
         """Get the node name."""
         return self._name
+
+    @property
+    def spec(self):
+        """Return SignalFilterSpec for this node."""
+        from visualpath.flow.specs import SignalFilterSpec
+        return SignalFilterSpec(
+            signal_name=self._signal_name,
+            threshold=self._threshold,
+            comparison=self._comparison,
+        )
 
     def _compare(self, value: float) -> bool:
         """Compare value against threshold."""
