@@ -806,3 +806,261 @@ class TestFlowGraphVisualization:
         assert "pipeline" in ascii_repr
         assert "SourceNode" in ascii_repr
         assert "PathNode" in ascii_repr
+
+
+# =============================================================================
+# Unified Modules API Tests
+# =============================================================================
+
+
+class AnalyzerModule:
+    """Test module that produces Observation."""
+
+    depends: List[str] = []
+
+    def __init__(self, name: str = "analyzer", value: float = 0.5):
+        self._name = name
+        self._value = value
+        self._count = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def process(self, frame, deps=None) -> Observation:
+        self._count += 1
+        return Observation(
+            source=self._name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"value": self._value, "count": self._count},
+        )
+
+    def initialize(self) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        pass
+
+
+class TriggerModule:
+    """Test module that produces FusionResult (trigger)."""
+
+    def __init__(self, name: str = "trigger", threshold: float = 0.3, depends_on: str = None):
+        self._name = name
+        self._threshold = threshold
+        self._depends_on = depends_on
+        self.depends = [depends_on] if depends_on else []
+        self._count = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def is_trigger(self) -> bool:
+        return True
+
+    def process(self, frame, deps=None) -> FusionResult:
+        self._count += 1
+        obs = None
+        if deps:
+            if self._depends_on and self._depends_on in deps:
+                obs = deps[self._depends_on]
+            else:
+                for v in deps.values():
+                    if hasattr(v, 'signals'):
+                        obs = v
+                        break
+
+        if not obs:
+            return FusionResult(should_trigger=False)
+
+        value = obs.signals.get("value", 0)
+        if value > self._threshold:
+            return FusionResult(should_trigger=True, score=value)
+        return FusionResult(should_trigger=False)
+
+    def initialize(self) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        pass
+
+
+class TestUnifiedModulesAPI:
+    """Test unified modules API for PathNode and FlowGraphBuilder."""
+
+    def test_pathnode_with_modules(self):
+        """Test PathNode accepts modules parameter."""
+        analyzer = AnalyzerModule("test_analyzer")
+        trigger = TriggerModule("test_trigger", depends_on="test_analyzer")
+
+        node = PathNode(name="test", modules=[analyzer, trigger])
+
+        assert node.name == "test"
+        assert node.modules == (analyzer, trigger)
+        assert node.path is None  # Not using legacy API
+
+    def test_pathnode_modules_generates_modulespec(self):
+        """Test PathNode with modules generates ModuleSpec."""
+        from visualpath.flow.specs import ModuleSpec
+
+        analyzer = AnalyzerModule("analyzer")
+        node = PathNode(name="analysis", modules=[analyzer], parallel=True)
+
+        spec = node.spec
+        assert isinstance(spec, ModuleSpec)
+        assert spec.modules == (analyzer,)
+        assert spec.parallel is True
+
+    def test_pathnode_legacy_generates_extractspec(self):
+        """Test PathNode with extractors generates ExtractSpec (legacy)."""
+        from visualpath.flow.specs import ExtractSpec
+
+        ext = CountingExtractor("ext")
+        node = PathNode(name="legacy", extractors=[ext])
+
+        spec = node.spec
+        assert isinstance(spec, ExtractSpec)
+        assert spec.extractors == (ext,)
+
+    def test_pathnode_auto_name_from_module(self):
+        """Test PathNode auto-generates name from first module."""
+        analyzer = AnalyzerModule("my_analyzer")
+        node = PathNode(modules=[analyzer])
+
+        assert node.name == "path_my_analyzer"
+
+    def test_builder_path_with_modules(self):
+        """Test FlowGraphBuilder.path() with modules parameter."""
+        analyzer = AnalyzerModule("analyzer")
+        trigger = TriggerModule("trigger", depends_on="analyzer")
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .path("analysis", modules=[analyzer, trigger])
+            .build())
+
+        assert "frames" in graph.nodes
+        assert "analysis" in graph.nodes
+        assert graph.nodes["analysis"].modules == (analyzer, trigger)
+
+    def test_builder_register_and_use_module(self):
+        """Test module registration and name-based reference."""
+        analyzer = AnalyzerModule("analyzer")
+
+        graph = (FlowGraphBuilder()
+            .register_module("my_analyzer", analyzer)
+            .source("frames")
+            .path("analysis", modules=["my_analyzer"])
+            .build())
+
+        assert graph.nodes["analysis"].modules == (analyzer,)
+
+    def test_builder_unknown_module_raises(self):
+        """Test that unknown module name raises ValueError."""
+        builder = FlowGraphBuilder().source("frames")
+
+        with pytest.raises(ValueError, match="Unknown module"):
+            builder.path("analysis", modules=["nonexistent"])
+
+    def test_executor_with_modules(self):
+        """Test GraphExecutor runs modules correctly."""
+        analyzer = AnalyzerModule("analyzer", value=0.5)
+        trigger = TriggerModule("trigger", threshold=0.3, depends_on="analyzer")
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .path("analysis", modules=[analyzer, trigger])
+            .build())
+
+        triggers_received = []
+        graph.on_trigger(lambda data: triggers_received.append(data))
+
+        executor = GraphExecutor(graph)
+
+        frame = MockFrame(frame_id=0, t_src_ns=0, data=np.zeros((10, 10, 3)))
+
+        with executor:
+            executor.process(frame)
+
+        assert analyzer._count == 1
+        assert trigger._count == 1
+        assert len(triggers_received) == 1  # value 0.5 > threshold 0.3
+
+    def test_executor_modules_no_trigger(self):
+        """Test executor when trigger condition is not met."""
+        analyzer = AnalyzerModule("analyzer", value=0.1)  # Below threshold
+        trigger = TriggerModule("trigger", threshold=0.3, depends_on="analyzer")
+
+        graph = (FlowGraphBuilder()
+            .source("frames")
+            .path("analysis", modules=[analyzer, trigger])
+            .build())
+
+        triggers_received = []
+        graph.on_trigger(lambda data: triggers_received.append(data))
+
+        executor = GraphExecutor(graph)
+        frame = MockFrame(frame_id=0, t_src_ns=0, data=np.zeros((10, 10, 3)))
+
+        with executor:
+            executor.process(frame)
+
+        assert analyzer._count == 1
+        assert trigger._count == 1
+        assert len(triggers_received) == 0  # No trigger
+
+    def test_pathnode_initialize_cleanup_modules(self):
+        """Test PathNode initializes and cleans up modules."""
+        init_called = []
+        cleanup_called = []
+
+        class TrackingModule:
+            depends = []
+
+            def __init__(self, name):
+                self._name = name
+
+            @property
+            def name(self):
+                return self._name
+
+            def process(self, frame, deps=None):
+                return None
+
+            def initialize(self):
+                init_called.append(self._name)
+
+            def cleanup(self):
+                cleanup_called.append(self._name)
+
+        mod1 = TrackingModule("mod1")
+        mod2 = TrackingModule("mod2")
+        node = PathNode(name="test", modules=[mod1, mod2])
+
+        node.initialize()
+        assert "mod1" in init_called
+        assert "mod2" in init_called
+
+        node.cleanup()
+        assert "mod1" in cleanup_called
+        assert "mod2" in cleanup_called
+
+    def test_parallel_option(self):
+        """Test parallel option is passed to ModuleSpec."""
+        from visualpath.flow.specs import ModuleSpec
+
+        analyzer = AnalyzerModule("analyzer")
+        node = PathNode(
+            name="parallel_analysis",
+            modules=[analyzer],
+            parallel=True,
+            join_window_ns=200_000_000,
+        )
+
+        spec = node.spec
+        assert isinstance(spec, ModuleSpec)
+        assert spec.parallel is True
+        assert spec.join_window_ns == 200_000_000

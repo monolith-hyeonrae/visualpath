@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from visualpath.core.extractor import BaseExtractor
     from visualpath.core.fusion import BaseFusion
     from visualpath.core.path import Path
+    from visualpath.core.module import Module
 
 
 class FlowGraphBuilder:
@@ -27,7 +28,15 @@ class FlowGraphBuilder:
     FlowGraphBuilder provides a chainable API for constructing
     FlowGraphs declaratively.
 
-    Example:
+    Example (unified modules API):
+        >>> graph = (FlowGraphBuilder()
+        ...     .source("frames")
+        ...     .sample(every_nth=3)
+        ...     .path("analysis", modules=[face_detector, smile_trigger])
+        ...     .on_trigger(handle_trigger)
+        ...     .build())
+
+    Example (legacy extractors/fusion API):
         >>> graph = (FlowGraphBuilder()
         ...     .source("frames")
         ...     .sample(every_nth=3)
@@ -49,12 +58,29 @@ class FlowGraphBuilder:
         self._last_node: Optional[str] = None
         self._path_last_nodes: Dict[str, str] = {}  # path_id -> last node name
 
-        # For path resolution
+        # For name-based resolution
+        self._modules: Dict[str, "Module"] = {}
+        # Legacy resolution
         self._extractors: Dict[str, "BaseExtractor"] = {}
         self._fusions: Dict[str, "BaseFusion"] = {}
 
+    def register_module(self, name: str, module: "Module") -> "FlowGraphBuilder":
+        """Register a module for later reference by name.
+
+        Args:
+            name: Name to reference the module.
+            module: Module instance.
+
+        Returns:
+            Self for chaining.
+        """
+        self._modules[name] = module
+        return self
+
     def register_extractor(self, name: str, extractor: "BaseExtractor") -> "FlowGraphBuilder":
         """Register an extractor for later reference by name.
+
+        DEPRECATED: Use register_module() instead.
 
         Args:
             name: Name to reference the extractor.
@@ -68,6 +94,8 @@ class FlowGraphBuilder:
 
     def register_fusion(self, name: str, fusion: "BaseFusion") -> "FlowGraphBuilder":
         """Register a fusion module for later reference by name.
+
+        DEPRECATED: Use register_module() instead.
 
         Args:
             name: Name to reference the fusion.
@@ -311,20 +339,32 @@ class FlowGraphBuilder:
     def path(
         self,
         name: str,
+        modules: Optional[List["Module"]] = None,
         extractors: Optional[List["BaseExtractor"]] = None,
         fusion: Optional["BaseFusion"] = None,
         path: Optional["Path"] = None,
         run_fusion: bool = True,
+        parallel: bool = False,
+        join_window_ns: int = 100_000_000,
         from_node: Optional[str] = None,
     ) -> "FlowGraphBuilder":
         """Add a path node.
 
+        Preferred API (unified modules):
+            builder.path("analysis", modules=[face_detector, smile_trigger])
+
+        Legacy API (extractors/fusion):
+            builder.path("analysis", extractors=[face_ext], fusion=smile_fusion)
+
         Args:
             name: Name for the path (also used as path_id).
-            extractors: List of extractors or extractor names.
-            fusion: Fusion module or fusion name.
-            path: Existing Path instance (alternative to extractors/fusion).
-            run_fusion: Whether to run fusion in this node.
+            modules: List of unified modules (or module names).
+            extractors: List of extractors or extractor names (legacy).
+            fusion: Fusion module or fusion name (legacy).
+            path: Existing Path instance (legacy).
+            run_fusion: Whether to run fusion (legacy).
+            parallel: Whether independent modules can run in parallel.
+            join_window_ns: Window for auto-joining parallel branches.
             from_node: Source node name (defaults to last node for this path).
 
         Returns:
@@ -335,10 +375,34 @@ class FlowGraphBuilder:
         if source is None:
             source = self._path_last_nodes.get(name, self._last_node)
 
-        if path is not None:
-            node = PathNode(path=path, run_fusion=run_fusion)
+        if modules is not None:
+            # Unified modules API
+            resolved_modules = []
+            for mod in modules:
+                if isinstance(mod, str):
+                    if mod in self._modules:
+                        resolved_modules.append(self._modules[mod])
+                    else:
+                        raise ValueError(f"Unknown module: {mod}")
+                else:
+                    resolved_modules.append(mod)
+
+            node = PathNode(
+                name=name,
+                modules=resolved_modules,
+                parallel=parallel,
+                join_window_ns=join_window_ns,
+            )
+        elif path is not None:
+            # Legacy: existing Path
+            node = PathNode(
+                path=path,
+                run_fusion=run_fusion,
+                parallel=parallel,
+                join_window_ns=join_window_ns,
+            )
         else:
-            # Resolve extractors and fusion by name if needed
+            # Legacy: extractors/fusion
             resolved_extractors = []
             if extractors:
                 for ext in extractors:
@@ -365,6 +429,8 @@ class FlowGraphBuilder:
                 extractors=resolved_extractors,
                 fusion=resolved_fusion,
                 run_fusion=run_fusion,
+                parallel=parallel,
+                join_window_ns=join_window_ns,
             )
 
         self._graph.add_node(node)

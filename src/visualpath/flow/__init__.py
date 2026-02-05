@@ -62,6 +62,7 @@ from visualpath.flow.nodes import (
 from visualpath.flow.specs import (
     NodeSpec,
     SourceSpec,
+    ModuleSpec,
     ExtractSpec,
     FilterSpec,
     ObservationFilterSpec,
@@ -110,6 +111,7 @@ __all__ = [
     # Specs
     "NodeSpec",
     "SourceSpec",
+    "ModuleSpec",
     "ExtractSpec",
     "FilterSpec",
     "ObservationFilterSpec",

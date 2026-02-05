@@ -183,11 +183,8 @@ def cmd_debug(
     if sample > 1:
         builder = builder.sample(every_nth=sample)
 
-    # Use legacy API for now (until PathNode supports modules directly)
-    if trigger:
-        builder = builder.path("main", extractors=[analyzer], fusion=trigger)
-    else:
-        builder = builder.path("main", extractors=[analyzer])
+    # Use unified modules API
+    builder = builder.path("main", modules=modules)
 
     graph = builder.build()
 
