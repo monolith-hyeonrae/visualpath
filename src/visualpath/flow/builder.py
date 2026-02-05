@@ -4,6 +4,7 @@ FlowGraphBuilder provides a declarative API for building FlowGraphs
 with method chaining.
 """
 
+import warnings
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from visualpath.flow.node import FlowNode, FlowData, Condition
@@ -80,7 +81,8 @@ class FlowGraphBuilder:
     def register_extractor(self, name: str, extractor: "BaseExtractor") -> "FlowGraphBuilder":
         """Register an extractor for later reference by name.
 
-        DEPRECATED: Use register_module() instead.
+        .. deprecated::
+            Use :meth:`register_module` instead.
 
         Args:
             name: Name to reference the extractor.
@@ -89,13 +91,19 @@ class FlowGraphBuilder:
         Returns:
             Self for chaining.
         """
+        warnings.warn(
+            "register_extractor() is deprecated. Use register_module() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._extractors[name] = extractor
         return self
 
     def register_fusion(self, name: str, fusion: "BaseFusion") -> "FlowGraphBuilder":
         """Register a fusion module for later reference by name.
 
-        DEPRECATED: Use register_module() instead.
+        .. deprecated::
+            Use :meth:`register_module` instead.
 
         Args:
             name: Name to reference the fusion.
@@ -104,6 +112,11 @@ class FlowGraphBuilder:
         Returns:
             Self for chaining.
         """
+        warnings.warn(
+            "register_fusion() is deprecated. Use register_module() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._fusions[name] = fusion
         return self
 
@@ -374,6 +387,15 @@ class FlowGraphBuilder:
         source = from_node
         if source is None:
             source = self._path_last_nodes.get(name, self._last_node)
+
+        # Emit deprecation warning for legacy API usage
+        if extractors is not None or fusion is not None or path is not None:
+            warnings.warn(
+                "extractors/fusion/path parameters are deprecated. "
+                "Use modules=[...] instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if modules is not None:
             # Unified modules API

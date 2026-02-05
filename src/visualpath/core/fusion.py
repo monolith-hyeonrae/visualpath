@@ -25,6 +25,7 @@ Example:
     ...         return FusionResult(should_trigger=False)
 """
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
@@ -58,6 +59,10 @@ class FusionResult:
 class BaseFusion(ABC):
     """Abstract base class for fusion modules.
 
+    .. deprecated::
+        Use :class:`visualpath.core.Module` instead.
+        BaseFusion will be removed in a future version.
+
     Fusion modules receive observations from multiple extractors,
     align them by timestamp, and decide when to fire triggers.
 
@@ -77,6 +82,18 @@ class BaseFusion(ABC):
         ...     if result.should_trigger:
         ...         handle_trigger(result.trigger)
     """
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Skip warning for internal classes
+        if cls.__module__.startswith("visualpath."):
+            return
+        warnings.warn(
+            f"{cls.__name__}: BaseFusion is deprecated. "
+            "Use visualpath.core.Module instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     @abstractmethod
     def update(self, observation: Observation) -> FusionResult:

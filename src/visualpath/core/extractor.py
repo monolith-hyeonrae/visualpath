@@ -36,6 +36,7 @@ Dependency-based extraction:
     ...         return Observation(...)
 """
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, TypeVar, Generic
@@ -77,6 +78,10 @@ class Observation(Generic[T]):
 
 class BaseExtractor(ABC):
     """Abstract base class for feature extractors.
+
+    .. deprecated::
+        Use :class:`visualpath.core.Module` instead.
+        BaseExtractor will be removed in a future version.
 
     Extractors analyze frames and produce observations containing
     extracted features. Multiple extractors can run in parallel,
@@ -121,6 +126,18 @@ class BaseExtractor(ABC):
 
     # Class attribute: list of extractor names this extractor depends on
     depends: List[str] = []
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Skip warning for internal classes (DummyExtractor, etc.)
+        if cls.__module__.startswith("visualpath."):
+            return
+        warnings.warn(
+            f"{cls.__name__}: BaseExtractor is deprecated. "
+            "Use visualpath.core.Module instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     @property
     @abstractmethod
