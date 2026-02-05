@@ -17,11 +17,17 @@ Example:
     >>> from visualpath.flow.interpreter import SimpleInterpreter
     >>> interpreter = SimpleInterpreter()
     >>> results = interpreter.interpret(node, data)
+
+Debug hooks:
+    >>> def on_interpret(event):
+    ...     print(f"{event['phase']} {event['node']}: {event}")
+    >>> interpreter = SimpleInterpreter(debug_hook=on_interpret)
 """
 
 import operator
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from visualpath.flow.node import FlowData, FlowNode
@@ -61,6 +67,52 @@ _COMPARISONS: Dict[str, Callable[[float, float], bool]] = {
 }
 
 
+@dataclass
+class DebugEvent:
+    """Debug event emitted by interpreter hooks.
+
+    Attributes:
+        phase: 'enter', 'exit', or 'state_change'
+        node: Node name
+        spec_type: Type name of the spec being interpreted
+        input_data: Input FlowData (for 'enter')
+        output_data: Output FlowData list (for 'exit')
+        output_count: Number of outputs produced
+        elapsed_ms: Processing time in milliseconds (for 'exit')
+        state_key: State key that changed (for 'state_change')
+        state_value: New state value (for 'state_change')
+        dropped: True if node filtered/dropped the data
+        extra: Additional context-specific info
+    """
+
+    phase: str
+    node: str
+    spec_type: str
+    input_data: Optional["FlowData"] = None
+    output_data: Optional[List["FlowData"]] = None
+    output_count: int = 0
+    elapsed_ms: float = 0.0
+    state_key: Optional[str] = None
+    state_value: Any = None
+    dropped: bool = False
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        if self.phase == "enter":
+            frame_id = getattr(self.input_data.frame, "frame_id", "?") if self.input_data else "?"
+            return f"[ENTER] {self.node} ({self.spec_type}) frame={frame_id}"
+        elif self.phase == "exit":
+            status = "DROPPED" if self.dropped else f"OUT={self.output_count}"
+            return f"[EXIT]  {self.node} ({self.spec_type}) {status} ({self.elapsed_ms:.3f}ms)"
+        elif self.phase == "state_change":
+            return f"[STATE] {self.node}.{self.state_key} = {self.state_value}"
+        return f"[{self.phase.upper()}] {self.node}"
+
+
+# Type alias for debug hook callback
+DebugHook = Callable[[DebugEvent], None]
+
+
 class SimpleInterpreter:
     """Spec-based interpreter for synchronous execution.
 
@@ -69,11 +121,48 @@ class SimpleInterpreter:
 
     This interpreter is used by SimpleBackend and GraphExecutor for
     sequential/local execution of flow graphs.
+
+    Debug hooks:
+        Pass a debug_hook callback to observe internal operations:
+
+        >>> def my_hook(event: DebugEvent):
+        ...     print(event)
+        >>> interpreter = SimpleInterpreter(debug_hook=my_hook)
+
+        Or use the built-in print hook:
+
+        >>> interpreter = SimpleInterpreter(debug=True)
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        debug: bool = False,
+        debug_hook: Optional[DebugHook] = None,
+    ) -> None:
         # Per-node mutable state, keyed by node name
         self._state: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self._debug = debug
+        self._debug_hook = debug_hook
+
+    def _emit_debug(self, event: DebugEvent) -> None:
+        """Emit a debug event to registered hooks."""
+        if self._debug:
+            print(event)
+        if self._debug_hook is not None:
+            self._debug_hook(event)
+
+    def _emit_state_change(
+        self, node_name: str, key: str, value: Any, spec_type: str = ""
+    ) -> None:
+        """Emit a state change debug event."""
+        if self._debug or self._debug_hook is not None:
+            self._emit_debug(DebugEvent(
+                phase="state_change",
+                node=node_name,
+                spec_type=spec_type,
+                state_key=key,
+                state_value=value,
+            ))
 
     def reset(self) -> None:
         """Clear all interpreter state."""
@@ -97,45 +186,73 @@ class SimpleInterpreter:
             TypeError: If the spec type is not recognized.
         """
         spec = node.spec
+        spec_type = type(spec).__name__
+        has_debug = self._debug or self._debug_hook is not None
+
+        # Emit enter event
+        if has_debug:
+            self._emit_debug(DebugEvent(
+                phase="enter",
+                node=node.name,
+                spec_type=spec_type,
+                input_data=data,
+            ))
+
+        start_time = time.perf_counter() if has_debug else 0
 
         match spec:
             case SourceSpec():
-                return self._interpret_source(spec, data)
+                outputs = self._interpret_source(spec, data)
             case ExtractSpec():
-                return self._interpret_extract(node, spec, data)
+                outputs = self._interpret_extract(node, spec, data)
             case FilterSpec():
-                return self._interpret_filter(spec, data)
+                outputs = self._interpret_filter(spec, data)
             case ObservationFilterSpec():
-                return self._interpret_observation_filter(spec, data)
+                outputs = self._interpret_observation_filter(spec, data)
             case SignalFilterSpec():
-                return self._interpret_signal_filter(spec, data)
+                outputs = self._interpret_signal_filter(spec, data)
             case SampleSpec():
-                return self._interpret_sample(node.name, spec, data)
+                outputs = self._interpret_sample(node.name, spec, data)
             case RateLimitSpec():
-                return self._interpret_rate_limit(node.name, spec, data)
+                outputs = self._interpret_rate_limit(node.name, spec, data)
             case TimestampSampleSpec():
-                return self._interpret_timestamp_sample(node.name, spec, data)
+                outputs = self._interpret_timestamp_sample(node.name, spec, data)
             case BranchSpec():
-                return self._interpret_branch(spec, data)
+                outputs = self._interpret_branch(spec, data)
             case FanOutSpec():
-                return self._interpret_fanout(spec, data)
+                outputs = self._interpret_fanout(spec, data)
             case MultiBranchSpec():
-                return self._interpret_multi_branch(spec, data)
+                outputs = self._interpret_multi_branch(spec, data)
             case ConditionalFanOutSpec():
-                return self._interpret_conditional_fanout(spec, data)
+                outputs = self._interpret_conditional_fanout(spec, data)
             case JoinSpec():
-                return self._interpret_join(node.name, spec, data)
+                outputs = self._interpret_join(node.name, spec, data)
             case CascadeFusionSpec():
-                return self._interpret_cascade_fusion(spec, data)
+                outputs = self._interpret_cascade_fusion(spec, data)
             case CollectorSpec():
-                return self._interpret_collector(node.name, spec, data)
+                outputs = self._interpret_collector(node.name, spec, data)
             case CustomSpec():
-                return self._interpret_custom(spec, data)
+                outputs = self._interpret_custom(spec, data)
             case _:
                 raise TypeError(
                     f"SimpleInterpreter does not know how to interpret "
                     f"{type(spec).__name__} from node '{node.name}'"
                 )
+
+        # Emit exit event
+        if has_debug:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            self._emit_debug(DebugEvent(
+                phase="exit",
+                node=node.name,
+                spec_type=spec_type,
+                output_data=outputs,
+                output_count=len(outputs),
+                elapsed_ms=elapsed_ms,
+                dropped=len(outputs) == 0,
+            ))
+
+        return outputs
 
     def flush_node(self, node: FlowNode) -> List[FlowData]:
         """Flush any buffered data for a stateful node.
@@ -268,6 +385,7 @@ class SimpleInterpreter:
         state = self._state[node_name]
         count = state.get("count", 0) + 1
         state["count"] = count
+        self._emit_state_change(node_name, "count", count, "SampleSpec")
 
         if count % spec.every_nth == 0:
             return [data]
@@ -283,11 +401,13 @@ class SimpleInterpreter:
 
         if last_time is None:
             state["last_time"] = now
+            self._emit_state_change(node_name, "last_time", now, "RateLimitSpec")
             return [data]
 
         elapsed_ms = (now - last_time) * 1000
         if elapsed_ms >= spec.min_interval_ms:
             state["last_time"] = now
+            self._emit_state_change(node_name, "last_time", now, "RateLimitSpec")
             return [data]
         return []
 
@@ -300,10 +420,16 @@ class SimpleInterpreter:
 
         if last_ts is None:
             state["last_timestamp_ns"] = data.timestamp_ns
+            self._emit_state_change(
+                node_name, "last_timestamp_ns", data.timestamp_ns, "TimestampSampleSpec"
+            )
             return [data]
 
         if data.timestamp_ns - last_ts >= spec.interval_ns:
             state["last_timestamp_ns"] = data.timestamp_ns
+            self._emit_state_change(
+                node_name, "last_timestamp_ns", data.timestamp_ns, "TimestampSampleSpec"
+            )
             return [data]
         return []
 
@@ -363,6 +489,9 @@ class SimpleInterpreter:
         # Buffer
         buffers = state.setdefault("buffers", {})
         buffers[data.path_id] = data
+        self._emit_state_change(
+            node_name, f"buffers[{data.path_id}]", "buffered", "JoinSpec"
+        )
 
         # Check emit condition
         if spec.mode == "any":
@@ -435,6 +564,9 @@ class SimpleInterpreter:
         state = self._state[node_name]
         buffer: List[FlowData] = state.setdefault("buffer", [])
         buffer.append(data)
+        self._emit_state_change(
+            node_name, "buffer_size", len(buffer), "CollectorSpec"
+        )
 
         if len(buffer) >= spec.batch_size:
             return self._emit_collector(node_name, spec)
@@ -477,4 +609,4 @@ class SimpleInterpreter:
         return []
 
 
-__all__ = ["SimpleInterpreter"]
+__all__ = ["SimpleInterpreter", "DebugEvent", "DebugHook"]

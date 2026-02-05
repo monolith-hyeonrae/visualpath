@@ -35,7 +35,7 @@ Example:
 
 from visualpath.flow.node import FlowNode, FlowData, Condition
 from visualpath.flow.graph import FlowGraph, Edge
-from visualpath.flow.interpreter import SimpleInterpreter
+from visualpath.flow.interpreter import SimpleInterpreter, DebugEvent, DebugHook
 from visualpath.flow.executor import GraphExecutor
 from visualpath.flow.builder import FlowGraphBuilder
 
@@ -87,6 +87,8 @@ __all__ = [
     "FlowGraph",
     "Edge",
     "SimpleInterpreter",
+    "DebugEvent",
+    "DebugHook",
     "GraphExecutor",
     "FlowGraphBuilder",
     # Nodes

@@ -14,7 +14,7 @@ from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
 from visualpath.flow.node import FlowData
 from visualpath.flow.graph import FlowGraph
-from visualpath.flow.interpreter import SimpleInterpreter
+from visualpath.flow.interpreter import SimpleInterpreter, DebugHook
 from visualpath.flow.specs import SourceSpec
 
 if TYPE_CHECKING:
@@ -29,16 +29,24 @@ class GraphExecutor:
         >>> with executor:
         ...     for frame in video:
         ...         results = executor.process(frame)
+
+    Debug mode:
+        >>> executor = GraphExecutor(graph, debug=True)
+        >>> # or with custom hook
+        >>> executor = GraphExecutor(graph, debug_hook=my_hook)
     """
 
     def __init__(
         self,
         graph: FlowGraph,
         on_trigger: Optional[Callable[[FlowData], None]] = None,
+        debug: bool = False,
+        debug_hook: Optional[DebugHook] = None,
     ):
         self._graph = graph
-        self._interpreter = SimpleInterpreter()
+        self._interpreter = SimpleInterpreter(debug=debug, debug_hook=debug_hook)
         self._initialized = False
+        self._debug = debug
 
         if on_trigger is not None:
             self._graph.on_trigger(on_trigger)
@@ -144,6 +152,12 @@ class GraphExecutor:
                 successors = self._graph.get_successors(
                     node_name, output_data.path_id
                 )
+
+                if self._debug:
+                    if successors:
+                        print(f"[ROUTE] {node_name} -> {successors} (path={output_data.path_id})")
+                    else:
+                        print(f"[TERMINAL] {node_name} (path={output_data.path_id})")
 
                 if not successors:
                     terminal_results.append(output_data)
