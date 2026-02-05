@@ -104,14 +104,18 @@ class DummyFusion(BaseFusion):
 
 
 class CustomNode(FlowNode):
-    """Custom node that does NOT override spec."""
+    """Custom node that uses CustomSpec."""
+
+    def __init__(self, processor=None):
+        self._processor = processor
 
     @property
     def name(self) -> str:
         return "custom"
 
-    def process(self, data: FlowData) -> List[FlowData]:
-        return [data]
+    @property
+    def spec(self) -> CustomSpec:
+        return CustomSpec(processor=self._processor)
 
 
 # =============================================================================
@@ -473,11 +477,14 @@ class TestCollectorNodeSpec:
 
 
 class TestCustomNodeSpec:
-    """Tests for custom nodes without spec."""
+    """Tests for custom nodes with CustomSpec."""
 
-    def test_custom_node_spec_is_none(self):
-        node = CustomNode()
-        assert node.spec is None
+    def test_custom_node_returns_custom_spec(self):
+        processor = lambda d: d
+        node = CustomNode(processor=processor)
+        spec = node.spec
+        assert isinstance(spec, CustomSpec)
+        assert spec.processor is processor
 
 
 # =============================================================================

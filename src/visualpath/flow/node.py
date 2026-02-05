@@ -3,25 +3,34 @@
 FlowNode is the abstract base class for all nodes in the flow graph.
 FlowData is the container that flows between nodes.
 
+Design principle:
+    Nodes are DECLARATIVE — they expose a spec describing their semantics.
+    Backends are INTERPRETERS — they read specs and execute accordingly.
+
+    FlowGraph is the AST, each node's spec is a token, backends are interpreters.
+
+    FlowNode.spec -> NodeSpec   (node declares)
+    Backend.interpret(spec)     (backend interprets and executes)
+
 Example:
     >>> from visualpath.flow.node import FlowNode, FlowData
+    >>> from visualpath.flow.specs import SampleSpec
     >>>
-    >>> class MyNode(FlowNode):
+    >>> class MySamplerNode(FlowNode):
     ...     @property
     ...     def name(self) -> str:
-    ...         return "my_node"
+    ...         return "my_sampler"
     ...
-    ...     def process(self, data: FlowData) -> List[FlowData]:
-    ...         # Transform data
-    ...         return [data]
+    ...     @property
+    ...     def spec(self) -> SampleSpec:
+    ...         return SampleSpec(every_nth=3)
 """
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from visualpath.flow.specs import NodeSpec as _NodeSpec
+from visualpath.flow.specs import NodeSpec
 
 if TYPE_CHECKING:
     from visualbase import Frame
@@ -134,23 +143,19 @@ class FlowData:
 class FlowNode(ABC):
     """Abstract base class for flow graph nodes.
 
-    FlowNodes process FlowData and produce zero or more output FlowData:
-    - 0 outputs: data is filtered/dropped
-    - 1 output: data passes through (possibly transformed)
-    - N outputs: data is branched/fanned out
+    FlowNodes are purely declarative. They expose a ``spec`` property
+    describing their semantics as a frozen dataclass. Backends read
+    the spec and decide how to execute it.
+
+    There is NO ``process()`` method. Execution logic lives in the
+    backend interpreter, not in the node.
 
     Subclasses must implement:
     - name: Unique identifier for the node
-    - process: Transform input FlowData to output(s)
+    - spec: NodeSpec describing the node's semantics
 
-    Example:
-        >>> class PassthroughNode(FlowNode):
-        ...     @property
-        ...     def name(self) -> str:
-        ...         return "passthrough"
-        ...
-        ...     def process(self, data: FlowData) -> List[FlowData]:
-        ...         return [data]
+    Lifecycle methods (initialize/cleanup) are retained because
+    resource management is a node responsibility (e.g., loading ML models).
     """
 
     @property
@@ -159,30 +164,15 @@ class FlowNode(ABC):
         """Unique name identifying this node."""
         ...
 
-    @abstractmethod
-    def process(self, data: FlowData) -> List[FlowData]:
-        """Process input data and produce output(s).
-
-        Args:
-            data: Input FlowData to process.
-
-        Returns:
-            List of output FlowData. Empty list means data is filtered.
-            Single item means pass-through. Multiple items means branching.
-        """
-        ...
-
     @property
-    def spec(self) -> Optional["_NodeSpec"]:
+    @abstractmethod
+    def spec(self) -> NodeSpec:
         """Declarative spec describing this node's semantics.
 
-        Backends use the spec for optimized dispatch. If ``None``,
-        the backend falls back to calling ``process()`` directly.
-
-        Override in subclasses to return a frozen dataclass from
-        :mod:`visualpath.flow.specs`.
+        Backends dispatch on the spec type to determine execution strategy.
+        Must return a frozen dataclass from :mod:`visualpath.flow.specs`.
         """
-        return None
+        ...
 
     def initialize(self) -> None:
         """Initialize node resources.

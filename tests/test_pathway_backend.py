@@ -147,70 +147,77 @@ class TestExecutionBackend:
         backend = SimpleBackend()
         assert isinstance(backend, ExecutionBackend)
         assert hasattr(backend, "execute")
-        assert hasattr(backend, "run")
-        assert hasattr(backend, "run_graph")
         assert hasattr(backend, "name")
 
 
 # =============================================================================
-# SimpleBackend Tests (backward compat shims)
+# SimpleBackend Tests (execute API)
 # =============================================================================
 
 
 class TestSimpleBackend:
-    """Tests for SimpleBackend via backward-compatible shims."""
+    """Tests for SimpleBackend.execute() with FlowGraph."""
 
     def test_run_single_extractor(self):
         """Test running with a single extractor."""
+        from visualpath.flow.graph import FlowGraph
+
         backend = SimpleBackend()
         extractor = CountingExtractor("test", return_value=0.3)
+        graph = FlowGraph.from_pipeline([extractor])
         frames = make_frames(5)
 
-        triggers = backend.run(iter(frames), [extractor])
+        result = backend.execute(iter(frames), graph)
 
         assert extractor._extract_count == 5
-        assert len(triggers) == 0  # No fusion
+        assert len(result.triggers) == 0  # No fusion
 
     def test_run_with_fusion(self):
         """Test running with fusion that triggers."""
+        from visualpath.flow.graph import FlowGraph
+
         backend = SimpleBackend()
         extractor = CountingExtractor("test", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([extractor], fusion=fusion)
         frames = make_frames(5)
 
-        triggers = backend.run(iter(frames), [extractor], fusion)
+        result = backend.execute(iter(frames), graph)
 
         assert extractor._extract_count == 5
         assert fusion._update_count == 5
-        assert len(triggers) == 5  # All frames trigger
+        assert len(result.triggers) == 5  # All frames trigger
 
     def test_run_with_callback(self):
-        """Test running with trigger callback."""
+        """Test running with trigger callback via graph."""
+        from visualpath.flow.graph import FlowGraph
+
         backend = SimpleBackend()
         extractor = CountingExtractor("test", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([extractor], fusion=fusion)
         frames = make_frames(3)
 
-        callback_triggers = []
-        triggers = backend.run(
-            iter(frames),
-            [extractor],
-            fusion,
-            on_trigger=lambda t: callback_triggers.append(t),
-        )
+        callback_data = []
+        graph.on_trigger(lambda d: callback_data.append(d))
 
-        assert len(callback_triggers) == 3
-        assert len(triggers) == 3
+        result = backend.execute(iter(frames), graph)
+
+        assert len(callback_data) == 3
+        assert len(result.triggers) == 3
 
     def test_run_multiple_extractors(self):
         """Test running with multiple extractors."""
+        from visualpath.flow.graph import FlowGraph
+
         backend = SimpleBackend()
         ext1 = CountingExtractor("ext1", return_value=0.3)
         ext2 = CountingExtractor("ext2", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([ext1, ext2], fusion=fusion)
         frames = make_frames(3)
 
-        triggers = backend.run(iter(frames), [ext1, ext2], fusion)
+        result = backend.execute(iter(frames), graph)
 
         assert ext1._extract_count == 3
         assert ext2._extract_count == 3
@@ -218,7 +225,7 @@ class TestSimpleBackend:
         assert fusion._update_count == 6
 
     def test_run_graph(self):
-        """Test run_graph with simple graph."""
+        """Test execute with simple graph."""
         from visualpath.flow import FlowGraph, SourceNode
 
         backend = SimpleBackend()
@@ -226,10 +233,9 @@ class TestSimpleBackend:
         graph.add_node(SourceNode("source"))
 
         frames = make_frames(3)
-        results = backend.run_graph(iter(frames), graph)
+        result = backend.execute(iter(frames), graph)
 
-        # run_graph shim returns empty list
-        assert results == []
+        assert result.frame_count == 3
 
 
 # =============================================================================
@@ -383,94 +389,102 @@ class TestPathwayExecution:
     """Tests that verify actual Pathway engine execution."""
 
     def test_run_single_extractor(self):
-        """Test PathwayBackend.run() with a single extractor through Pathway engine."""
+        """Test PathwayBackend.execute() with a single extractor through Pathway engine."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         extractor = CountingExtractor("test", return_value=0.3)
+        graph = FlowGraph.from_pipeline([extractor])
         frames = make_frames(5)
 
-        triggers = backend.run(iter(frames), [extractor])
+        result = backend.execute(iter(frames), graph)
 
         # No fusion = no triggers
-        assert len(triggers) == 0
+        assert len(result.triggers) == 0
         # Extractor should have been called for each frame
         assert extractor._extract_count == 5
 
     def test_run_with_fusion_triggers(self):
-        """Test PathwayBackend.run() with fusion that fires triggers."""
+        """Test PathwayBackend.execute() with fusion that fires triggers."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         extractor = CountingExtractor("test", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([extractor], fusion=fusion)
         frames = make_frames(5)
 
-        triggers = backend.run(iter(frames), [extractor], fusion)
+        result = backend.execute(iter(frames), graph)
 
         # All frames should trigger (value 0.7 > threshold 0.5)
-        assert len(triggers) == 5
+        assert len(result.triggers) == 5
         assert extractor._extract_count == 5
         assert fusion._update_count == 5
 
     def test_run_with_fusion_no_trigger(self):
-        """Test PathwayBackend.run() when fusion doesn't fire."""
+        """Test PathwayBackend.execute() when fusion doesn't fire."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         extractor = CountingExtractor("test", return_value=0.3)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([extractor], fusion=fusion)
         frames = make_frames(3)
 
-        triggers = backend.run(iter(frames), [extractor], fusion)
+        result = backend.execute(iter(frames), graph)
 
         # value 0.3 < threshold 0.5 → no triggers
-        assert len(triggers) == 0
+        assert len(result.triggers) == 0
         assert extractor._extract_count == 3
         assert fusion._update_count == 3
 
     def test_run_multiple_extractors(self):
-        """Test PathwayBackend.run() with multiple extractors."""
+        """Test PathwayBackend.execute() with multiple extractors."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         ext1 = CountingExtractor("ext1", return_value=0.3)
         ext2 = CountingExtractor("ext2", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([ext1, ext2], fusion=fusion)
         frames = make_frames(3)
 
-        triggers = backend.run(iter(frames), [ext1, ext2], fusion)
+        result = backend.execute(iter(frames), graph)
 
         assert ext1._extract_count == 3
         assert ext2._extract_count == 3
         # Fusion receives observations from both extractors
         assert fusion._update_count == 6
         # Only ext2's observations (0.7) trigger, not ext1's (0.3)
-        assert len(triggers) == 3
+        assert len(result.triggers) == 3
 
     def test_run_with_callback(self):
-        """Test PathwayBackend.run() with on_trigger callback."""
+        """Test PathwayBackend.execute() with on_trigger callback via graph."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         extractor = CountingExtractor("test", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([extractor], fusion=fusion)
         frames = make_frames(3)
 
-        callback_triggers = []
-        triggers = backend.run(
-            iter(frames),
-            [extractor],
-            fusion,
-            on_trigger=lambda t: callback_triggers.append(t),
-        )
+        callback_data = []
+        graph.on_trigger(lambda d: callback_data.append(d))
 
-        assert len(callback_triggers) == 3
-        assert len(triggers) == 3
+        result = backend.execute(iter(frames), graph)
+
+        assert len(callback_data) == 3
+        assert len(result.triggers) == 3
 
     def test_run_cleanup_on_error(self):
         """Test that cleanup happens even if extraction errors."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         class ErrorExtractor(BaseExtractor):
             _name = "error"
@@ -492,11 +506,12 @@ class TestPathwayExecution:
 
         backend = PathwayBackend(autocommit_ms=10)
         ext = ErrorExtractor()
+        graph = FlowGraph.from_pipeline([ext])
         frames = make_frames(2)
 
         # Should not raise - errors are caught inside UDF
-        triggers = backend.run(iter(frames), [ext])
-        assert len(triggers) == 0
+        result = backend.execute(iter(frames), graph)
+        assert len(result.triggers) == 0
 
 
 # =============================================================================
@@ -569,51 +584,58 @@ class TestBackendComparison:
     def test_same_trigger_count(self):
         """Test both backends produce the same number of triggers."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         # Simple backend
         simple = SimpleBackend()
         ext_s = CountingExtractor("test", return_value=0.7)
         fusion_s = ThresholdFusion(threshold=0.5)
-        simple_triggers = simple.run(iter(make_frames(5)), [ext_s], fusion_s)
+        graph_s = FlowGraph.from_pipeline([ext_s], fusion=fusion_s)
+        simple_result = simple.execute(iter(make_frames(5)), graph_s)
 
         # Pathway backend
         pathway = PathwayBackend(autocommit_ms=10)
         ext_p = CountingExtractor("test", return_value=0.7)
         fusion_p = ThresholdFusion(threshold=0.5)
-        pathway_triggers = pathway.run(iter(make_frames(5)), [ext_p], fusion_p)
+        graph_p = FlowGraph.from_pipeline([ext_p], fusion=fusion_p)
+        pathway_result = pathway.execute(iter(make_frames(5)), graph_p)
 
-        assert len(simple_triggers) == len(pathway_triggers)
+        assert len(simple_result.triggers) == len(pathway_result.triggers)
 
     def test_same_extract_count(self):
         """Test both backends call extractors the same number of times."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         ext_s = CountingExtractor("test", return_value=0.5)
-        SimpleBackend().run(iter(make_frames(10)), [ext_s])
+        graph_s = FlowGraph.from_pipeline([ext_s])
+        SimpleBackend().execute(iter(make_frames(10)), graph_s)
 
         ext_p = CountingExtractor("test", return_value=0.5)
-        PathwayBackend(autocommit_ms=10).run(iter(make_frames(10)), [ext_p])
+        graph_p = FlowGraph.from_pipeline([ext_p])
+        PathwayBackend(autocommit_ms=10).execute(iter(make_frames(10)), graph_p)
 
         assert ext_s._extract_count == ext_p._extract_count
 
     def test_no_trigger_consistency(self):
         """Test both backends agree on no-trigger case."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         ext_s = CountingExtractor("test", return_value=0.2)
         fusion_s = ThresholdFusion(threshold=0.5)
-        simple_triggers = SimpleBackend().run(
-            iter(make_frames(5)), [ext_s], fusion_s
-        )
+        graph_s = FlowGraph.from_pipeline([ext_s], fusion=fusion_s)
+        simple_result = SimpleBackend().execute(iter(make_frames(5)), graph_s)
 
         ext_p = CountingExtractor("test", return_value=0.2)
         fusion_p = ThresholdFusion(threshold=0.5)
-        pathway_triggers = PathwayBackend(autocommit_ms=10).run(
-            iter(make_frames(5)), [ext_p], fusion_p
+        graph_p = FlowGraph.from_pipeline([ext_p], fusion=fusion_p)
+        pathway_result = PathwayBackend(autocommit_ms=10).execute(
+            iter(make_frames(5)), graph_p
         )
 
-        assert len(simple_triggers) == 0
-        assert len(pathway_triggers) == 0
+        assert len(simple_result.triggers) == 0
+        assert len(pathway_result.triggers) == 0
 
 
 # =============================================================================
@@ -893,13 +915,15 @@ class TestPathwayDepsExecution:
     def test_deps_through_pathway(self):
         """Test deps work when running through actual Pathway engine."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         upstream = UpstreamExtractor()
         dependent = DependentExtractor()
+        graph = FlowGraph.from_pipeline([upstream, dependent])
         frames = make_frames(3)
 
-        backend.run(iter(frames), [upstream, dependent])
+        backend.execute(iter(frames), graph)
 
         assert upstream._extract_count == 3
         assert dependent._extract_count == 3
@@ -1242,12 +1266,14 @@ class TestPathwayBackendStats:
     def test_get_stats_after_run(self):
         """Test get_stats after running pipeline."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         extractor = CountingExtractor("test", return_value=0.5)
+        graph = FlowGraph.from_pipeline([extractor])
         frames = make_frames(5)
 
-        backend.run(iter(frames), [extractor])
+        backend.execute(iter(frames), graph)
 
         s = backend.get_stats()
         assert s["frames_ingested"] == 5
@@ -1261,13 +1287,15 @@ class TestPathwayBackendStats:
     def test_get_stats_with_fusion_triggers(self):
         """Test get_stats tracks triggers."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         extractor = CountingExtractor("test", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([extractor], fusion=fusion)
         frames = make_frames(3)
 
-        backend.run(iter(frames), [extractor], fusion)
+        backend.execute(iter(frames), graph)
 
         s = backend.get_stats()
         assert s["triggers_fired"] == 3
@@ -1275,13 +1303,15 @@ class TestPathwayBackendStats:
     def test_get_stats_per_extractor_time(self):
         """Test per-extractor time tracking."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         ext1 = CountingExtractor("ext1", return_value=0.3)
         ext2 = CountingExtractor("ext2", return_value=0.7)
+        graph = FlowGraph.from_pipeline([ext1, ext2])
         frames = make_frames(3)
 
-        backend.run(iter(frames), [ext1, ext2])
+        backend.execute(iter(frames), graph)
 
         s = backend.get_stats()
         assert "ext1" in s["per_extractor_time_ms"]
@@ -1290,30 +1320,35 @@ class TestPathwayBackendStats:
     def test_stats_reset_between_runs(self):
         """Test that stats reset between consecutive runs."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         ext = CountingExtractor("test", return_value=0.5)
 
         # First run
-        backend.run(iter(make_frames(5)), [ext])
+        graph1 = FlowGraph.from_pipeline([ext])
+        backend.execute(iter(make_frames(5)), graph1)
         s1 = backend.get_stats()
         assert s1["frames_ingested"] == 5
 
         # Second run - stats should be fresh
         ext2 = CountingExtractor("test", return_value=0.5)
-        backend.run(iter(make_frames(3)), [ext2])
+        graph2 = FlowGraph.from_pipeline([ext2])
+        backend.execute(iter(make_frames(3)), graph2)
         s2 = backend.get_stats()
         assert s2["frames_ingested"] == 3
 
     def test_get_stats_timing_fields(self):
         """Test timing-related stats fields."""
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = PathwayBackend(autocommit_ms=10)
         ext = CountingExtractor("test", return_value=0.5)
+        graph = FlowGraph.from_pipeline([ext])
         frames = make_frames(5)
 
-        backend.run(iter(frames), [ext])
+        backend.execute(iter(frames), graph)
 
         s = backend.get_stats()
         assert s["total_extraction_ms"] > 0
@@ -1344,6 +1379,7 @@ class TestPathwayObservabilityHub:
         """Test SessionStartRecord and SessionEndRecord are emitted."""
         from visualpath.observability import ObservabilityHub, TraceLevel, MemorySink
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         hub = ObservabilityHub.get_instance()
         sink = MemorySink()
@@ -1351,7 +1387,8 @@ class TestPathwayObservabilityHub:
 
         backend = PathwayBackend(autocommit_ms=10)
         ext = CountingExtractor("test", return_value=0.5)
-        backend.run(iter(make_frames(3)), [ext])
+        graph = FlowGraph.from_pipeline([ext])
+        backend.execute(iter(make_frames(3)), graph)
 
         records = sink.get_records()
         types = [r.record_type for r in records]
@@ -1367,6 +1404,7 @@ class TestPathwayObservabilityHub:
         """Test TimingRecords are emitted at NORMAL level."""
         from visualpath.observability import ObservabilityHub, TraceLevel, MemorySink
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         hub = ObservabilityHub.get_instance()
         sink = MemorySink()
@@ -1374,7 +1412,8 @@ class TestPathwayObservabilityHub:
 
         backend = PathwayBackend(autocommit_ms=10)
         ext = CountingExtractor("test", return_value=0.5)
-        backend.run(iter(make_frames(3)), [ext])
+        graph = FlowGraph.from_pipeline([ext])
+        backend.execute(iter(make_frames(3)), graph)
 
         records = sink.get_records()
         types = [r.record_type for r in records]
@@ -1388,6 +1427,7 @@ class TestPathwayObservabilityHub:
         """Test no records emitted when hub is OFF."""
         from visualpath.observability import ObservabilityHub, TraceLevel, MemorySink
         from visualpath.backends.pathway import PathwayBackend
+        from visualpath.flow.graph import FlowGraph
 
         hub = ObservabilityHub.get_instance()
         sink = MemorySink()
@@ -1396,6 +1436,7 @@ class TestPathwayObservabilityHub:
 
         backend = PathwayBackend(autocommit_ms=10)
         ext = CountingExtractor("test", return_value=0.5)
-        backend.run(iter(make_frames(3)), [ext])
+        graph = FlowGraph.from_pipeline([ext])
+        backend.execute(iter(make_frames(3)), graph)
 
         assert len(sink) == 0

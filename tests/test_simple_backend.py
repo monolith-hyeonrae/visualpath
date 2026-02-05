@@ -2,7 +2,6 @@
 
 Tests verify:
 - SimpleBackend.execute() with FlowGraph
-- Backward-compatible run()/run_graph() shims
 - PipelineResult structure
 """
 
@@ -219,96 +218,24 @@ class TestSimpleBackendExecute:
         assert ext._extract_count == 3
         assert len(triggered) == 3
 
-
-# =============================================================================
-# Backward-Compatible Shim Tests
-# =============================================================================
-
-
-class TestSimpleBackendRunShim:
-    """Tests for backward-compatible run() shim."""
-
-    def test_run_basic(self):
-        """Test run() shim works."""
+    def test_execute_with_callback(self):
+        """Test execute() with on_trigger callback registered on graph."""
         from visualpath.backends.simple import SimpleBackend
+        from visualpath.flow.graph import FlowGraph
 
         backend = SimpleBackend()
         ext = CountingExtractor("test", value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
-        frames = make_frames(5)
-
-        triggers = backend.run(iter(frames), [ext], fusion)
-
-        assert len(triggers) == 5
-        assert ext._extract_count == 5
-
-    def test_run_no_fusion(self):
-        """Test run() without fusion."""
-        from visualpath.backends.simple import SimpleBackend
-
-        backend = SimpleBackend()
-        ext = CountingExtractor("test", value=0.7)
-        frames = make_frames(5)
-
-        triggers = backend.run(iter(frames), [ext])
-
-        assert len(triggers) == 0
-        assert ext._extract_count == 5
-
-    def test_run_with_callback(self):
-        """Test run() with on_trigger callback."""
-        from visualpath.backends.simple import SimpleBackend
-
-        backend = SimpleBackend()
-        ext = CountingExtractor("test", value=0.7)
-        fusion = ThresholdFusion(threshold=0.5)
+        graph = FlowGraph.from_pipeline([ext], fusion=fusion)
         frames = make_frames(3)
 
-        callback_triggers = []
-        triggers = backend.run(
-            iter(frames),
-            [ext],
-            fusion,
-            on_trigger=lambda t: callback_triggers.append(t),
-        )
+        callback_data = []
+        graph.on_trigger(lambda d: callback_data.append(d))
 
-        assert len(callback_triggers) == 3
-        assert len(triggers) == 3
+        result = backend.execute(iter(frames), graph)
 
-    def test_run_multiple_extractors(self):
-        """Test run() with multiple extractors."""
-        from visualpath.backends.simple import SimpleBackend
-
-        backend = SimpleBackend()
-        ext1 = CountingExtractor("ext1", value=0.3)
-        ext2 = CountingExtractor("ext2", value=0.7)
-        fusion = ThresholdFusion(threshold=0.5)
-        frames = make_frames(3)
-
-        triggers = backend.run(iter(frames), [ext1, ext2], fusion)
-
-        assert ext1._extract_count == 3
-        assert ext2._extract_count == 3
-        assert fusion._update_count == 6
-
-
-class TestSimpleBackendRunGraphShim:
-    """Tests for backward-compatible run_graph() shim."""
-
-    def test_run_graph(self):
-        """Test run_graph() shim with simple graph."""
-        from visualpath.backends.simple import SimpleBackend
-        from visualpath.flow import FlowGraph, SourceNode
-
-        backend = SimpleBackend()
-        graph = FlowGraph()
-        graph.add_node(SourceNode("source"))
-
-        frames = make_frames(3)
-        results = backend.run_graph(iter(frames), graph)
-
-        # run_graph returns empty list (backward compat)
-        assert results == []
+        assert len(callback_data) == 3
+        assert len(result.triggers) == 3
 
 
 # =============================================================================
@@ -331,8 +258,6 @@ class TestExecutionBackend:
         backend = SimpleBackend()
         assert isinstance(backend, ExecutionBackend)
         assert hasattr(backend, "execute")
-        assert hasattr(backend, "run")
-        assert hasattr(backend, "run_graph")
         assert hasattr(backend, "name")
 
 

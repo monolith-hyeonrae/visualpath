@@ -1,27 +1,28 @@
-"""Graph executor for running flow graphs.
+"""Graph executor for running flow graphs via the interpreter.
 
-GraphExecutor processes frames through a FlowGraph, handling
-data routing, branching, and trigger firing.
+GraphExecutor drives frame processing through a FlowGraph, using
+SimpleInterpreter to interpret each node's spec. The executor handles:
+- Converting frames to FlowData via SourceSpec
+- Routing data through nodes based on edges and path_id
+- Firing triggers at terminal nodes
+
+This is a convenience wrapper around FlowGraph + SimpleInterpreter.
 """
 
 from collections import deque
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, TYPE_CHECKING
 
 from visualpath.flow.node import FlowData
 from visualpath.flow.graph import FlowGraph
+from visualpath.flow.interpreter import SimpleInterpreter
+from visualpath.flow.specs import SourceSpec
 
 if TYPE_CHECKING:
     from visualbase import Frame
 
 
 class GraphExecutor:
-    """Executes a FlowGraph by processing frames through nodes.
-
-    GraphExecutor handles:
-    - Converting frames to FlowData via SourceNode
-    - Routing data through nodes based on edges
-    - Filtering by path_id for conditional routing
-    - Firing triggers at terminal nodes
+    """Executes a FlowGraph using SimpleInterpreter.
 
     Example:
         >>> executor = GraphExecutor(graph)
@@ -35,14 +36,8 @@ class GraphExecutor:
         graph: FlowGraph,
         on_trigger: Optional[Callable[[FlowData], None]] = None,
     ):
-        """Initialize the executor.
-
-        Args:
-            graph: FlowGraph to execute.
-            on_trigger: Optional callback for triggers (in addition to
-                any callbacks registered on the graph).
-        """
         self._graph = graph
+        self._interpreter = SimpleInterpreter()
         self._initialized = False
 
         if on_trigger is not None:
@@ -50,22 +45,25 @@ class GraphExecutor:
 
     @property
     def graph(self) -> FlowGraph:
-        """Get the underlying flow graph."""
         return self._graph
 
+    @property
+    def interpreter(self) -> SimpleInterpreter:
+        return self._interpreter
+
     def initialize(self) -> None:
-        """Initialize the executor and all graph nodes."""
         if self._initialized:
             return
         self._graph.validate()
         self._graph.initialize()
+        self._interpreter.reset()
         self._initialized = True
 
     def cleanup(self) -> None:
-        """Clean up the executor and all graph nodes."""
         if not self._initialized:
             return
         self._graph.cleanup()
+        self._interpreter.reset()
         self._initialized = False
 
     def __enter__(self) -> "GraphExecutor":
@@ -83,27 +81,30 @@ class GraphExecutor:
 
         Returns:
             List of FlowData that reached terminal nodes.
-
-        Raises:
-            RuntimeError: If executor not initialized.
         """
         if not self._initialized:
-            raise RuntimeError("Executor not initialized. Use context manager or call initialize().")
+            raise RuntimeError(
+                "Executor not initialized. Use context manager or call initialize()."
+            )
 
-        # Get entry node and create initial FlowData
         entry_name = self._graph.entry_node
         if entry_name is None:
             return []
 
         entry_node = self._graph.nodes[entry_name]
+        spec = entry_node.spec
 
-        # Use SourceNode.process_frame if available, otherwise wrap manually
-        if hasattr(entry_node, "process_frame"):
-            initial_data = entry_node.process_frame(frame)
+        # Create FlowData from frame using SourceSpec's default_path_id
+        if isinstance(spec, SourceSpec):
+            initial_data = FlowData(
+                frame=frame,
+                path_id=spec.default_path_id,
+                timestamp_ns=getattr(frame, "t_src_ns", 0),
+            )
         else:
             initial_data = FlowData(
                 frame=frame,
-                timestamp_ns=frame.t_src_ns if hasattr(frame, "t_src_ns") else 0,
+                timestamp_ns=getattr(frame, "t_src_ns", 0),
             )
 
         return self.process_data(initial_data)
@@ -128,7 +129,6 @@ class GraphExecutor:
         terminal_results: List[FlowData] = []
 
         # BFS through the graph
-        # Each item is (node_name, FlowData)
         queue: deque[tuple[str, FlowData]] = deque()
         queue.append((entry_name, data))
 
@@ -136,34 +136,25 @@ class GraphExecutor:
             node_name, current_data = queue.popleft()
             node = self._graph.nodes[node_name]
 
-            # Process through this node
-            outputs = node.process(current_data)
+            # Interpret the node's spec
+            outputs = self._interpreter.interpret(node, current_data)
 
             # Route outputs to successors
             for output_data in outputs:
-                # Get successors filtered by path_id
-                successors = self._graph.get_successors(node_name, output_data.path_id)
+                successors = self._graph.get_successors(
+                    node_name, output_data.path_id
+                )
 
                 if not successors:
-                    # This is a terminal point for this data
                     terminal_results.append(output_data)
-                    # Fire triggers if this is a terminal node
                     if node_name in terminal_nodes:
                         self._graph.fire_triggers(output_data)
                 else:
-                    # Queue for next nodes
                     for successor in successors:
                         queue.append((successor, output_data))
 
         return terminal_results
 
     def process_batch(self, frames: List["Frame"]) -> List[List[FlowData]]:
-        """Process multiple frames through the graph.
-
-        Args:
-            frames: List of frames to process.
-
-        Returns:
-            List of result lists, one per input frame.
-        """
+        """Process multiple frames through the graph."""
         return [self.process(frame) for frame in frames]

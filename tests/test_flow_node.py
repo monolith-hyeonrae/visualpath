@@ -1,4 +1,10 @@
-"""Tests for flow nodes."""
+"""Tests for flow nodes and SimpleInterpreter.
+
+The new architecture: nodes are declarative (spec only), the interpreter
+executes them. Tests verify:
+1. Node spec correctness (node declares correctly)
+2. Interpreter execution (interpreter executes spec correctly)
+"""
 
 import pytest
 import numpy as np
@@ -15,6 +21,7 @@ from visualpath.core import (
 from visualpath.flow import (
     FlowData,
     FlowNode,
+    SimpleInterpreter,
     SourceNode,
     PathNode,
     FilterNode,
@@ -61,7 +68,7 @@ class CountingExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame) -> Optional[Observation]:
+    def extract(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -137,7 +144,7 @@ def make_flow_data(
 
 
 # =============================================================================
-# FlowData Tests
+# FlowData Tests (unchanged — FlowData is a plain dataclass)
 # =============================================================================
 
 
@@ -145,9 +152,7 @@ class TestFlowData:
     """Tests for FlowData dataclass."""
 
     def test_basic_creation(self):
-        """Test creating FlowData."""
         data = FlowData()
-
         assert data.frame is None
         assert data.observations == []
         assert data.results == []
@@ -156,7 +161,6 @@ class TestFlowData:
         assert data.timestamp_ns == 0
 
     def test_with_values(self):
-        """Test creating FlowData with values."""
         frame = make_frame()
         data = FlowData(
             frame=frame,
@@ -164,395 +168,338 @@ class TestFlowData:
             timestamp_ns=1000000,
             metadata={"key": "value"},
         )
-
         assert data.frame is frame
         assert data.path_id == "human"
         assert data.timestamp_ns == 1000000
         assert data.metadata["key"] == "value"
 
     def test_clone(self):
-        """Test cloning FlowData."""
         data = make_flow_data(path_id="original")
         clone = data.clone()
-
         assert clone.path_id == "original"
         assert clone is not data
         assert clone.observations is not data.observations
 
     def test_clone_with_overrides(self):
-        """Test cloning with overrides."""
         data = make_flow_data(path_id="original")
         clone = data.clone(path_id="modified", timestamp_ns=5000)
-
         assert clone.path_id == "modified"
         assert clone.timestamp_ns == 5000
         assert data.path_id == "original"
 
     def test_with_path(self):
-        """Test with_path helper."""
         data = make_flow_data(path_id="original")
         new_data = data.with_path("new_path")
-
         assert new_data.path_id == "new_path"
         assert data.path_id == "original"
 
     def test_add_observation(self):
-        """Test adding observations."""
         data = make_flow_data()
         obs = Observation(source="test", frame_id=1, t_ns=1000)
         new_data = data.add_observation(obs)
-
         assert len(new_data.observations) == 1
         assert len(data.observations) == 0
 
     def test_add_result(self):
-        """Test adding results."""
         data = make_flow_data()
         result = FusionResult(should_trigger=True, score=0.9)
         new_data = data.add_result(result)
-
         assert len(new_data.results) == 1
         assert len(data.results) == 0
 
 
 # =============================================================================
-# SourceNode Tests
+# SourceNode Tests (via interpreter)
 # =============================================================================
 
 
 class TestSourceNode:
-    """Tests for SourceNode."""
+    """Tests for SourceNode spec and interpreter execution."""
 
     def test_basic_creation(self):
-        """Test creating SourceNode."""
         node = SourceNode("my_source")
-
         assert node.name == "my_source"
 
-    def test_process_frame(self):
-        """Test converting Frame to FlowData."""
-        node = SourceNode("source", default_path_id="main")
-        frame = make_frame(frame_id=5, t_ns=5_000_000)
-
-        data = node.process_frame(frame)
-
-        assert data.frame is frame
-        assert data.path_id == "main"
-        assert data.timestamp_ns == 5_000_000
-
-    def test_process_passthrough(self):
-        """Test process passes through FlowData."""
+    def test_interpret_passthrough(self):
+        """Interpreter passes data through for SourceSpec."""
         node = SourceNode("source")
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
+        outputs = interp.interpret(node, data)
 
         assert len(outputs) == 1
         assert outputs[0] is data
 
 
 # =============================================================================
-# FilterNode Tests
+# FilterNode Tests (via interpreter)
 # =============================================================================
 
 
 class TestFilterNode:
-    """Tests for FilterNode."""
+    """Tests for FilterNode via interpreter."""
 
     def test_filter_passes(self):
-        """Test filter that passes data."""
         node = FilterNode("always_pass", condition=lambda d: True)
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
 
     def test_filter_blocks(self):
-        """Test filter that blocks data."""
         node = FilterNode("always_block", condition=lambda d: False)
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 0
 
     def test_filter_with_condition(self):
-        """Test filter with custom condition."""
         node = FilterNode(
             "has_metadata",
             condition=lambda d: "key" in d.metadata,
         )
+        interp = SimpleInterpreter()
 
         data_with_key = make_flow_data()
         data_with_key = data_with_key.clone(metadata={"key": "value"})
-
         data_without_key = make_flow_data()
 
-        assert len(node.process(data_with_key)) == 1
-        assert len(node.process(data_without_key)) == 0
+        assert len(interp.interpret(node, data_with_key)) == 1
+        assert len(interp.interpret(node, data_without_key)) == 0
 
 
 class TestObservationFilter:
-    """Tests for ObservationFilter."""
+    """Tests for ObservationFilter via interpreter."""
 
     def test_passes_with_observations(self):
-        """Test filter passes when observations exist."""
         node = ObservationFilter("obs_filter", min_count=1)
+        interp = SimpleInterpreter()
         obs = Observation(source="test", frame_id=1, t_ns=1000)
         data = make_flow_data(observations=[obs])
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
 
     def test_blocks_without_observations(self):
-        """Test filter blocks when no observations."""
         node = ObservationFilter("obs_filter", min_count=1)
+        interp = SimpleInterpreter()
         data = make_flow_data(observations=[])
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 0
 
     def test_min_count(self):
-        """Test minimum count requirement."""
         node = ObservationFilter("obs_filter", min_count=3)
+        interp = SimpleInterpreter()
         obs = Observation(source="test", frame_id=1, t_ns=1000)
 
         data_1 = make_flow_data(observations=[obs])
         data_3 = make_flow_data(observations=[obs, obs, obs])
 
-        assert len(node.process(data_1)) == 0
-        assert len(node.process(data_3)) == 1
+        assert len(interp.interpret(node, data_1)) == 0
+        assert len(interp.interpret(node, data_3)) == 1
 
 
 class TestSignalThresholdFilter:
-    """Tests for SignalThresholdFilter."""
+    """Tests for SignalThresholdFilter via interpreter."""
 
     def test_gt_comparison(self):
-        """Test greater than comparison."""
         node = SignalThresholdFilter("score_filter", "score", threshold=0.5, comparison="gt")
+        interp = SimpleInterpreter()
         obs_low = Observation(source="test", frame_id=1, t_ns=1000, signals={"score": 0.3})
         obs_high = Observation(source="test", frame_id=1, t_ns=1000, signals={"score": 0.8})
 
-        assert len(node.process(make_flow_data(observations=[obs_low]))) == 0
-        assert len(node.process(make_flow_data(observations=[obs_high]))) == 1
+        assert len(interp.interpret(node, make_flow_data(observations=[obs_low]))) == 0
+        assert len(interp.interpret(node, make_flow_data(observations=[obs_high]))) == 1
 
     def test_le_comparison(self):
-        """Test less than or equal comparison."""
         node = SignalThresholdFilter("score_filter", "score", threshold=0.5, comparison="le")
+        interp = SimpleInterpreter()
         obs_low = Observation(source="test", frame_id=1, t_ns=1000, signals={"score": 0.3})
         obs_high = Observation(source="test", frame_id=1, t_ns=1000, signals={"score": 0.8})
 
-        assert len(node.process(make_flow_data(observations=[obs_low]))) == 1
-        assert len(node.process(make_flow_data(observations=[obs_high]))) == 0
+        assert len(interp.interpret(node, make_flow_data(observations=[obs_low]))) == 1
+        assert len(interp.interpret(node, make_flow_data(observations=[obs_high]))) == 0
 
 
 # =============================================================================
-# SamplerNode Tests
+# SamplerNode Tests (via interpreter — state is in interpreter)
 # =============================================================================
 
 
 class TestSamplerNode:
-    """Tests for SamplerNode."""
+    """Tests for SamplerNode via interpreter."""
 
     def test_every_1(self):
-        """Test sampling every frame (no sampling)."""
         node = SamplerNode("sample", every_nth=1)
+        interp = SimpleInterpreter()
 
         for i in range(10):
             data = make_flow_data()
-            outputs = node.process(data)
+            outputs = interp.interpret(node, data)
             assert len(outputs) == 1
 
     def test_every_3(self):
-        """Test sampling every 3rd frame."""
         node = SamplerNode("sample", every_nth=3)
+        interp = SimpleInterpreter()
         results = []
 
         for i in range(9):
             data = make_flow_data()
-            outputs = node.process(data)
+            outputs = interp.interpret(node, data)
             results.append(len(outputs))
 
-        # Should pass on frames 3, 6, 9 (0-indexed: 2, 5, 8)
         assert results == [0, 0, 1, 0, 0, 1, 0, 0, 1]
 
     def test_reset(self):
-        """Test resetting sampler."""
         node = SamplerNode("sample", every_nth=3)
+        interp = SimpleInterpreter()
 
-        # Process 2 frames (not enough to trigger)
-        node.process(make_flow_data())
-        node.process(make_flow_data())
+        interp.interpret(node, make_flow_data())
+        interp.interpret(node, make_flow_data())
 
-        # Reset
-        node.reset()
+        # Reset interpreter state for this node
+        interp.reset_node(node.name)
 
-        # Should need 3 more frames to trigger
         results = []
         for i in range(3):
-            outputs = node.process(make_flow_data())
+            outputs = interp.interpret(node, make_flow_data())
             results.append(len(outputs))
 
         assert results == [0, 0, 1]
 
     def test_invalid_every_nth(self):
-        """Test that invalid every_nth raises error."""
         with pytest.raises(ValueError):
             SamplerNode("sample", every_nth=0)
 
 
 class TestRateLimiterNode:
-    """Tests for RateLimiterNode."""
+    """Tests for RateLimiterNode via interpreter."""
 
     def test_first_frame_passes(self):
-        """Test first frame always passes."""
         node = RateLimiterNode("limit", min_interval_ms=100)
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
 
     def test_rate_limiting(self):
-        """Test that rapid frames are filtered."""
         node = RateLimiterNode("limit", min_interval_ms=50)
+        interp = SimpleInterpreter()
 
         # First frame passes
-        outputs1 = node.process(make_flow_data())
+        outputs1 = interp.interpret(node, make_flow_data())
         assert len(outputs1) == 1
 
         # Immediate second frame should be blocked
-        outputs2 = node.process(make_flow_data())
+        outputs2 = interp.interpret(node, make_flow_data())
         assert len(outputs2) == 0
 
         # Wait and third frame should pass
-        time.sleep(0.06)  # 60ms
-        outputs3 = node.process(make_flow_data())
+        time.sleep(0.06)
+        outputs3 = interp.interpret(node, make_flow_data())
         assert len(outputs3) == 1
 
 
 class TestTimestampSamplerNode:
-    """Tests for TimestampSamplerNode."""
+    """Tests for TimestampSamplerNode via interpreter."""
 
     def test_first_frame_passes(self):
-        """Test first frame always passes."""
         node = TimestampSamplerNode("ts_sample", interval_ns=100_000_000)
+        interp = SimpleInterpreter()
         data = make_flow_data(timestamp_ns=0)
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
 
     def test_timestamp_based_sampling(self):
-        """Test sampling based on timestamps."""
-        node = TimestampSamplerNode("ts_sample", interval_ns=100_000_000)  # 100ms
+        node = TimestampSamplerNode("ts_sample", interval_ns=100_000_000)
+        interp = SimpleInterpreter()
 
-        # Frame at 0ms - passes (first frame)
-        assert len(node.process(make_flow_data(timestamp_ns=0))) == 1
-
-        # Frame at 50ms - blocked (not enough time)
-        assert len(node.process(make_flow_data(timestamp_ns=50_000_000))) == 0
-
-        # Frame at 100ms - passes (interval elapsed)
-        assert len(node.process(make_flow_data(timestamp_ns=100_000_000))) == 1
-
-        # Frame at 120ms - blocked
-        assert len(node.process(make_flow_data(timestamp_ns=120_000_000))) == 0
+        assert len(interp.interpret(node, make_flow_data(timestamp_ns=0))) == 1
+        assert len(interp.interpret(node, make_flow_data(timestamp_ns=50_000_000))) == 0
+        assert len(interp.interpret(node, make_flow_data(timestamp_ns=100_000_000))) == 1
+        assert len(interp.interpret(node, make_flow_data(timestamp_ns=120_000_000))) == 0
 
 
 # =============================================================================
-# BranchNode Tests
+# BranchNode Tests (via interpreter)
 # =============================================================================
 
 
 class TestBranchNode:
-    """Tests for BranchNode."""
+    """Tests for BranchNode via interpreter."""
 
     def test_branch_true(self):
-        """Test branching when condition is true."""
-        node = BranchNode(
-            "branch",
-            condition=lambda d: True,
-            if_true="path_a",
-            if_false="path_b",
-        )
+        node = BranchNode("branch", condition=lambda d: True, if_true="path_a", if_false="path_b")
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
         assert outputs[0].path_id == "path_a"
 
     def test_branch_false(self):
-        """Test branching when condition is false."""
-        node = BranchNode(
-            "branch",
-            condition=lambda d: False,
-            if_true="path_a",
-            if_false="path_b",
-        )
+        node = BranchNode("branch", condition=lambda d: False, if_true="path_a", if_false="path_b")
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
         assert outputs[0].path_id == "path_b"
 
     def test_branch_with_data_condition(self):
-        """Test branching based on data content."""
         node = BranchNode(
             "branch",
             condition=lambda d: len(d.observations) > 0,
             if_true="has_obs",
             if_false="no_obs",
         )
+        interp = SimpleInterpreter()
 
         obs = Observation(source="test", frame_id=1, t_ns=1000)
         data_with_obs = make_flow_data(observations=[obs])
         data_without_obs = make_flow_data(observations=[])
 
-        assert node.process(data_with_obs)[0].path_id == "has_obs"
-        assert node.process(data_without_obs)[0].path_id == "no_obs"
+        assert interp.interpret(node, data_with_obs)[0].path_id == "has_obs"
+        assert interp.interpret(node, data_without_obs)[0].path_id == "no_obs"
 
 
 class TestFanOutNode:
-    """Tests for FanOutNode."""
+    """Tests for FanOutNode via interpreter."""
 
     def test_fanout_multiple_paths(self):
-        """Test fanning out to multiple paths."""
         node = FanOutNode("fanout", paths=["a", "b", "c"])
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 3
         path_ids = {o.path_id for o in outputs}
         assert path_ids == {"a", "b", "c"}
 
     def test_fanout_data_cloned(self):
-        """Test that fanout clones data."""
         node = FanOutNode("fanout", paths=["a", "b"])
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert outputs[0] is not outputs[1]
-        assert outputs[0].frame is outputs[1].frame  # Frame reference shared
+        assert outputs[0].frame is outputs[1].frame
 
     def test_fanout_empty_paths_raises(self):
-        """Test that empty paths raises error."""
         with pytest.raises(ValueError):
             FanOutNode("fanout", paths=[])
 
 
 class TestMultiBranchNode:
-    """Tests for MultiBranchNode."""
+    """Tests for MultiBranchNode via interpreter."""
 
     def test_first_match(self):
-        """Test routing to first matching branch."""
         node = MultiBranchNode(
             "multi",
             branches=[
@@ -561,100 +508,73 @@ class TestMultiBranchNode:
             ],
             default="default",
         )
+        interp = SimpleInterpreter()
 
         data_a = make_flow_data()
         data_a = data_a.clone(metadata={"type": "a"})
-
-        outputs = node.process(data_a)
-
+        outputs = interp.interpret(node, data_a)
         assert len(outputs) == 1
         assert outputs[0].path_id == "path_a"
 
     def test_default_path(self):
-        """Test routing to default when no match."""
         node = MultiBranchNode(
             "multi",
-            branches=[
-                (lambda d: False, "never"),
-            ],
+            branches=[(lambda d: False, "never")],
             default="default",
         )
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
         assert outputs[0].path_id == "default"
 
     def test_no_match_no_default(self):
-        """Test no output when no match and no default."""
         node = MultiBranchNode(
             "multi",
-            branches=[
-                (lambda d: False, "never"),
-            ],
+            branches=[(lambda d: False, "never")],
             default=None,
         )
+        interp = SimpleInterpreter()
         data = make_flow_data()
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 0
 
 
 # =============================================================================
-# JoinNode Tests
+# JoinNode Tests (via interpreter — buffers are in interpreter state)
 # =============================================================================
 
 
 class TestJoinNode:
-    """Tests for JoinNode."""
+    """Tests for JoinNode via interpreter."""
 
     def test_join_all_mode(self):
-        """Test joining in 'all' mode."""
-        node = JoinNode(
-            "join",
-            input_paths=["a", "b"],
-            mode="all",
-            window_ns=100_000_000,
-            output_path_id="merged",
-        )
+        node = JoinNode("join", input_paths=["a", "b"], mode="all", window_ns=100_000_000, output_path_id="merged")
+        interp = SimpleInterpreter()
 
         data_a = make_flow_data(path_id="a", timestamp_ns=0)
         data_b = make_flow_data(path_id="b", timestamp_ns=0)
 
-        # First input - should buffer
-        outputs_a = node.process(data_a)
+        outputs_a = interp.interpret(node, data_a)
         assert len(outputs_a) == 0
 
-        # Second input - should emit
-        outputs_b = node.process(data_b)
+        outputs_b = interp.interpret(node, data_b)
         assert len(outputs_b) == 1
         assert outputs_b[0].path_id == "merged"
 
     def test_join_any_mode(self):
-        """Test joining in 'any' mode."""
-        node = JoinNode(
-            "join",
-            input_paths=["a", "b"],
-            mode="any",
-            output_path_id="merged",
-        )
+        node = JoinNode("join", input_paths=["a", "b"], mode="any", output_path_id="merged")
+        interp = SimpleInterpreter()
 
         data_a = make_flow_data(path_id="a", timestamp_ns=0)
-
-        # Should emit immediately
-        outputs = node.process(data_a)
+        outputs = interp.interpret(node, data_a)
         assert len(outputs) == 1
 
     def test_join_merges_observations(self):
-        """Test that join merges observations."""
-        node = JoinNode(
-            "join",
-            input_paths=["a", "b"],
-            mode="all",
-            merge_observations=True,
-        )
+        node = JoinNode("join", input_paths=["a", "b"], mode="all", merge_observations=True)
+        interp = SimpleInterpreter()
 
         obs_a = Observation(source="ext_a", frame_id=1, t_ns=1000)
         obs_b = Observation(source="ext_b", frame_id=1, t_ns=1000)
@@ -662,169 +582,149 @@ class TestJoinNode:
         data_a = make_flow_data(path_id="a", timestamp_ns=0, observations=[obs_a])
         data_b = make_flow_data(path_id="b", timestamp_ns=0, observations=[obs_b])
 
-        node.process(data_a)
-        outputs = node.process(data_b)
+        interp.interpret(node, data_a)
+        outputs = interp.interpret(node, data_b)
 
         assert len(outputs) == 1
         assert len(outputs[0].observations) == 2
 
     def test_join_passthrough_unknown_path(self):
-        """Test that unknown paths pass through."""
-        node = JoinNode(
-            "join",
-            input_paths=["a", "b"],
-            mode="all",
-        )
+        node = JoinNode("join", input_paths=["a", "b"], mode="all")
+        interp = SimpleInterpreter()
 
         data_c = make_flow_data(path_id="c", timestamp_ns=0)
-
-        outputs = node.process(data_c)
+        outputs = interp.interpret(node, data_c)
 
         assert len(outputs) == 1
         assert outputs[0].path_id == "c"
 
     def test_flush(self):
-        """Test flushing pending buffers."""
-        node = JoinNode(
-            "join",
-            input_paths=["a", "b"],
-            mode="all",
-        )
+        node = JoinNode("join", input_paths=["a", "b"], mode="all")
+        interp = SimpleInterpreter()
 
         data_a = make_flow_data(path_id="a", timestamp_ns=0)
-        node.process(data_a)
+        interp.interpret(node, data_a)
 
-        # Flush should emit incomplete buffer
-        outputs = node.flush()
+        outputs = interp.flush_node(node)
         assert len(outputs) == 1
 
 
 class TestCascadeFusionNode:
-    """Tests for CascadeFusionNode."""
+    """Tests for CascadeFusionNode via interpreter."""
 
     def test_applies_fusion_function(self):
-        """Test that fusion function is applied."""
         def add_score(data: FlowData) -> FlowData:
             new_meta = dict(data.metadata)
             new_meta["total_score"] = sum(r.score for r in data.results)
             return data.clone(metadata=new_meta)
 
         node = CascadeFusionNode("cascade", fusion_fn=add_score)
+        interp = SimpleInterpreter()
 
         result1 = FusionResult(should_trigger=False, score=0.3)
         result2 = FusionResult(should_trigger=False, score=0.5)
         data = make_flow_data()
         data = data.clone(results=[result1, result2])
 
-        outputs = node.process(data)
-
+        outputs = interp.interpret(node, data)
         assert len(outputs) == 1
         assert outputs[0].metadata["total_score"] == 0.8
 
 
 class TestCollectorNode:
-    """Tests for CollectorNode."""
+    """Tests for CollectorNode via interpreter."""
 
     def test_collect_by_batch_size(self):
-        """Test collecting by batch size."""
         node = CollectorNode("collect", batch_size=3)
+        interp = SimpleInterpreter()
 
-        # First two don't emit
-        assert len(node.process(make_flow_data())) == 0
-        assert len(node.process(make_flow_data())) == 0
+        assert len(interp.interpret(node, make_flow_data())) == 0
+        assert len(interp.interpret(node, make_flow_data())) == 0
 
-        # Third emits
-        outputs = node.process(make_flow_data())
+        outputs = interp.interpret(node, make_flow_data())
         assert len(outputs) == 1
         assert outputs[0].metadata["_batch_size"] == 3
 
     def test_flush_partial(self):
-        """Test flushing partial batch."""
         node = CollectorNode("collect", batch_size=5, emit_partial=True)
+        interp = SimpleInterpreter()
 
-        node.process(make_flow_data())
-        node.process(make_flow_data())
+        interp.interpret(node, make_flow_data())
+        interp.interpret(node, make_flow_data())
 
-        outputs = node.flush()
+        outputs = interp.flush_node(node)
         assert len(outputs) == 1
         assert outputs[0].metadata["_batch_size"] == 2
 
 
 # =============================================================================
-# PathNode Tests
+# PathNode Tests (via interpreter)
 # =============================================================================
 
 
 class TestPathNode:
-    """Tests for PathNode."""
+    """Tests for PathNode via interpreter."""
 
     def test_with_existing_path(self):
-        """Test wrapping existing Path."""
         ext = CountingExtractor("ext1", return_value=0.7)
         path = Path(name="test_path", extractors=[ext])
-
         node = PathNode(path=path)
-
         assert node.name == "test_path"
         assert node.path is path
 
     def test_with_components(self):
-        """Test creating path from components."""
         ext = CountingExtractor("ext1")
         fusion = ThresholdFusion()
-
         node = PathNode(name="my_path", extractors=[ext], fusion=fusion)
-
         assert node.name == "my_path"
 
-    def test_process_adds_observations(self):
-        """Test that process adds observations."""
+    def test_interpret_adds_observations(self):
         ext = CountingExtractor("ext1", return_value=0.7)
         path = Path(name="test", extractors=[ext])
         node = PathNode(path=path, run_fusion=False)
+        interp = SimpleInterpreter()
 
         frame = make_frame()
         data = make_flow_data(frame=frame)
 
         with node:
-            outputs = node.process(data)
+            outputs = interp.interpret(node, data)
 
         assert len(outputs) == 1
         assert len(outputs[0].observations) == 1
         assert outputs[0].observations[0].source == "ext1"
 
-    def test_process_runs_fusion(self):
-        """Test that process runs fusion when enabled."""
+    def test_interpret_runs_fusion(self):
         ext = CountingExtractor("ext1", return_value=0.7)
         fusion = ThresholdFusion(threshold=0.5)
         path = Path(name="test", extractors=[ext], fusion=fusion)
         node = PathNode(path=path, run_fusion=True)
+        interp = SimpleInterpreter()
 
         frame = make_frame()
         data = make_flow_data(frame=frame)
 
         with node:
-            outputs = node.process(data)
+            outputs = interp.interpret(node, data)
 
         assert len(outputs) == 1
         assert len(outputs[0].results) == 1
         assert outputs[0].results[0].should_trigger  # 0.7 > 0.5
 
     def test_updates_path_id(self):
-        """Test that process updates path_id."""
         ext = CountingExtractor("ext1")
         path = Path(name="human", extractors=[ext])
         node = PathNode(path=path, run_fusion=False)
+        interp = SimpleInterpreter()
 
         frame = make_frame()
         data = make_flow_data(frame=frame, path_id="original")
 
         with node:
-            outputs = node.process(data)
+            outputs = interp.interpret(node, data)
 
         assert outputs[0].path_id == "human"
 
     def test_requires_name_or_path(self):
-        """Test that either name or path is required."""
         with pytest.raises(ValueError):
             PathNode()
