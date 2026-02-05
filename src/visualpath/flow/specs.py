@@ -35,22 +35,65 @@ class SourceSpec(NodeSpec):
 
 
 @dataclass(frozen=True)
+class ModuleSpec(NodeSpec):
+    """Spec for module execution (unified extractor/fusion).
+
+    Modules are processed in dependency order. Each module can produce
+    either Observation (analysis) or FusionResult (trigger).
+
+    Attributes:
+        modules: Tuple of modules to run (in dependency order).
+        parallel: Whether independent modules can run in parallel.
+        join_window_ns: Window for auto-joining parallel module branches.
+    """
+
+    modules: tuple = ()
+    parallel: bool = False
+    join_window_ns: int = 100_000_000  # 100ms
+
+
+@dataclass(frozen=True)
 class ExtractSpec(NodeSpec):
     """Spec for PathNode (extractor execution).
 
+    DEPRECATED: Use ModuleSpec instead.
+
+    Maintained for backward compatibility. New code should use
+    ModuleSpec with unified modules list.
+
     Attributes:
-        extractors: List of extractors to run.
-        fusion: Optional fusion module.
-        parallel: Whether extractors can run in parallel.
+        extractors: List of extractors to run (legacy).
+        fusion: Optional fusion module (legacy).
+        modules: Unified list of modules (preferred).
+        parallel: Whether modules can run in parallel.
         run_fusion: Whether to run fusion after extraction.
-        join_window_ns: Window for auto-joining parallel extractor branches.
+        join_window_ns: Window for auto-joining parallel branches.
     """
 
+    # Legacy fields (deprecated)
     extractors: tuple = ()
     fusion: Optional[Any] = None
-    parallel: bool = False
     run_fusion: bool = True
+
+    # New unified field
+    modules: tuple = ()
+
+    # Shared fields
+    parallel: bool = False
     join_window_ns: int = 100_000_000  # 100ms
+
+    def get_modules(self) -> tuple:
+        """Get all modules (extractors + fusion) as unified list.
+
+        Returns modules if set, otherwise combines extractors and fusion.
+        """
+        if self.modules:
+            return self.modules
+        # Legacy: combine extractors and fusion
+        result = list(self.extractors)
+        if self.fusion is not None and self.run_fusion:
+            result.append(self.fusion)
+        return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -240,7 +283,8 @@ class CustomSpec(NodeSpec):
 __all__ = [
     "NodeSpec",
     "SourceSpec",
-    "ExtractSpec",
+    "ModuleSpec",
+    "ExtractSpec",  # Deprecated, use ModuleSpec
     "FilterSpec",
     "ObservationFilterSpec",
     "SignalFilterSpec",

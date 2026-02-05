@@ -34,6 +34,7 @@ from visualpath.flow.node import FlowData, FlowNode
 from visualpath.flow.specs import (
     NodeSpec,
     SourceSpec,
+    ModuleSpec,
     ExtractSpec,
     FilterSpec,
     ObservationFilterSpec,
@@ -203,6 +204,8 @@ class SimpleInterpreter:
         match spec:
             case SourceSpec():
                 outputs = self._interpret_source(spec, data)
+            case ModuleSpec():
+                outputs = self._interpret_modules(node, spec, data)
             case ExtractSpec():
                 outputs = self._interpret_extract(node, spec, data)
             case FilterSpec():
@@ -279,17 +282,136 @@ class SimpleInterpreter:
         return [data]
 
     # -----------------------------------------------------------------
-    # Extract (runs extractors + optional fusion)
+    # Modules (unified extractor/fusion processing)
+    # -----------------------------------------------------------------
+
+    def _interpret_modules(
+        self, node: FlowNode, spec: ModuleSpec, data: FlowData
+    ) -> List[FlowData]:
+        """Run modules on the frame (unified extractor/fusion).
+
+        Modules are processed in order. Each module can depend on
+        previous modules' outputs. Outputs are automatically routed
+        to the appropriate list (observations or results).
+        """
+        from visualpath.core.fusion import FusionResult
+
+        frame = data.frame
+        if frame is None:
+            return [data]
+
+        # Build dependency map from existing data
+        deps: Dict[str, Any] = {
+            obs.source: obs for obs in data.observations
+        }
+        # Also include existing results by source if available
+        for result in data.results:
+            if hasattr(result, 'reason') and result.reason:
+                deps[result.reason] = result
+
+        observations: List["Observation"] = []
+        results: List[FusionResult] = []
+
+        for module in spec.modules:
+            # Collect dependencies for this module
+            module_deps = None
+            if hasattr(module, 'depends') and module.depends:
+                module_deps = {
+                    name: deps[name]
+                    for name in module.depends
+                    if name in deps
+                }
+
+            # Call module.process() or legacy extract()
+            output = self._call_module(module, frame, module_deps)
+
+            if output is not None:
+                # Route output based on type
+                if isinstance(output, FusionResult):
+                    results.append(output)
+                    # Store by module name for downstream deps
+                    deps[module.name] = output
+                else:
+                    # Assume Observation
+                    observations.append(output)
+                    deps[module.name] = output
+
+        # Update FlowData
+        result = data.clone(
+            observations=list(data.observations) + observations,
+            results=list(data.results) + results,
+            path_id=node.name,
+        )
+
+        return [result]
+
+    def _call_module(
+        self,
+        module: Any,
+        frame: Any,
+        deps: Optional[Dict[str, Any]],
+    ) -> Any:
+        """Call a module's process method with backward compatibility.
+
+        Handles both:
+        - New Module interface: process(frame, deps)
+        - Legacy Extractor: extract(frame, deps)
+        - Legacy Fusion: update(observation)
+        """
+        # Try new Module.process() first
+        if hasattr(module, 'process'):
+            try:
+                return module.process(frame, deps)
+            except TypeError:
+                # Might be old signature
+                return module.process(frame)
+
+        # Legacy Extractor
+        if hasattr(module, 'extract'):
+            try:
+                return module.extract(frame, deps)
+            except TypeError:
+                return module.extract(frame)
+
+        # Legacy Fusion (takes Observation, not frame)
+        if hasattr(module, 'update'):
+            # Fusion needs observation from deps
+            if deps:
+                for obs in deps.values():
+                    if hasattr(obs, 'source'):  # It's an Observation
+                        return module.update(obs)
+            return None
+
+        raise TypeError(
+            f"Module {getattr(module, 'name', module)} has no "
+            f"process(), extract(), or update() method"
+        )
+
+    # -----------------------------------------------------------------
+    # Extract (legacy - uses extractors + optional fusion)
     # -----------------------------------------------------------------
 
     def _interpret_extract(
         self, node: FlowNode, spec: ExtractSpec, data: FlowData
     ) -> List[FlowData]:
-        """Run extractors on the frame, optionally apply fusion."""
+        """Run extractors on the frame, optionally apply fusion.
+
+        DEPRECATED: Use ModuleSpec with _interpret_modules instead.
+        """
         frame = data.frame
         if frame is None:
             return [data]
 
+        # If spec has unified modules, delegate to _interpret_modules
+        if spec.modules:
+            module_spec = ModuleSpec(
+                modules=spec.modules,
+                parallel=spec.parallel,
+                join_window_ns=spec.join_window_ns,
+            )
+            return self._interpret_modules(node, module_spec, data)
+
+        # Legacy: separate extractors and fusion
         # Build dependency map from existing observations
         deps: Dict[str, "Observation"] = {
             obs.source: obs for obs in data.observations
@@ -298,7 +420,7 @@ class SimpleInterpreter:
 
         for extractor in spec.extractors:
             extractor_deps = None
-            if extractor.depends:
+            if hasattr(extractor, 'depends') and extractor.depends:
                 extractor_deps = {
                     name: deps[name]
                     for name in extractor.depends
@@ -316,14 +438,26 @@ class SimpleInterpreter:
             path_id=node.name,
         )
 
-        # Optionally run fusion
+        # Optionally run fusion/trigger module
         if spec.run_fusion and spec.fusion is not None:
             from visualpath.core.fusion import FusionResult
 
             results: List[FusionResult] = []
+            fusion = spec.fusion
+
             for obs in observations:
-                fusion_result = spec.fusion.update(obs)
-                results.append(fusion_result)
+                # Support both legacy .update() and new .process()
+                if hasattr(fusion, 'update'):
+                    fusion_result = fusion.update(obs)
+                elif hasattr(fusion, 'process'):
+                    # New Module interface - pass deps
+                    deps_for_fusion = {obs.source: obs}
+                    fusion_result = fusion.process(frame, deps_for_fusion)
+                else:
+                    continue
+
+                if fusion_result is not None:
+                    results.append(fusion_result)
 
             result = result.clone(
                 results=list(result.results) + results,
@@ -337,7 +471,18 @@ class SimpleInterpreter:
         frame: Any,
         deps: Optional[Dict[str, "Observation"]],
     ) -> Optional["Observation"]:
-        """Call extractor.extract with backward compatibility."""
+        """Call extractor.extract with backward compatibility.
+
+        Also supports new Module.process() interface.
+        """
+        # Try new Module.process() first
+        if hasattr(extractor, 'process') and not hasattr(extractor, 'extract'):
+            try:
+                return extractor.process(frame, deps)
+            except TypeError:
+                return extractor.process(frame)
+
+        # Legacy extract()
         try:
             return extractor.extract(frame, deps)
         except TypeError:

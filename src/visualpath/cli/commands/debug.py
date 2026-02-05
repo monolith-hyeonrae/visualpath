@@ -2,6 +2,7 @@
 
 Usage:
     visualpath debug --frames 10 --sample 3 --debug
+    visualpath debug --frames 5 --modules "analyzer,trigger" --debug
 """
 
 import sys
@@ -30,12 +31,12 @@ def make_mock_frames(count: int, interval_ns: int = 100_000_000) -> List[MockFra
     ]
 
 
-class DummyExtractor:
-    """Simple extractor for CLI testing."""
+class AnalyzerModule:
+    """Unified Module that produces Observation."""
 
     depends: List[str] = []
 
-    def __init__(self, name: str = "dummy"):
+    def __init__(self, name: str = "analyzer"):
         self._name = name
         self._count = 0
 
@@ -43,7 +44,7 @@ class DummyExtractor:
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None):
+    def process(self, frame, deps=None):
         from visualpath.core import Observation
         self._count += 1
         return Observation(
@@ -59,17 +60,49 @@ class DummyExtractor:
     def cleanup(self) -> None:
         pass
 
-
-class DummyFusion:
-    """Simple fusion for CLI testing."""
-
-    def __init__(self, threshold: float = 0.3):
-        self._threshold = threshold
+    def reset(self) -> None:
         self._count = 0
 
-    def update(self, obs):
+
+class TriggerModule:
+    """Unified Module that produces FusionResult (trigger)."""
+
+    def __init__(self, name: str = "trigger", threshold: float = 0.3, depends_on: str = None):
+        self._name = name
+        self._threshold = threshold
+        self._count = 0
+        self._depends_on = depends_on
+        # depends will be set when we know the analyzer name
+        self.depends = [depends_on] if depends_on else []
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def is_trigger(self) -> bool:
+        return True
+
+    def process(self, frame, deps=None):
         from visualpath.core import FusionResult
         self._count += 1
+
+        # Get observation from deps (try multiple keys)
+        obs = None
+        if deps:
+            # Try specific dependency name first
+            if self._depends_on and self._depends_on in deps:
+                obs = deps[self._depends_on]
+            else:
+                # Fallback: use first observation in deps
+                for v in deps.values():
+                    if hasattr(v, 'signals'):  # It's an Observation
+                        obs = v
+                        break
+
+        if not obs:
+            return FusionResult(should_trigger=False)
+
         value = obs.signals.get("value", 0)
 
         if value > self._threshold:
@@ -84,16 +117,19 @@ class DummyFusion:
             return FusionResult(should_trigger=True, trigger=trigger, score=value)
         return FusionResult(should_trigger=False)
 
+    def initialize(self) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        pass
+
     def reset(self) -> None:
         self._count = 0
 
-    @property
-    def is_gate_open(self) -> bool:
-        return True
 
-    @property
-    def in_cooldown(self) -> bool:
-        return False
+# Legacy aliases for backward compatibility
+DummyExtractor = AnalyzerModule
+DummyFusion = TriggerModule
 
 
 def cmd_debug(
@@ -109,8 +145,8 @@ def cmd_debug(
     Args:
         frames: Number of frames to process.
         sample: Sample every Nth frame.
-        extractor: Extractor name.
-        fusion: Enable fusion (triggers).
+        extractor: Extractor name (legacy) or module name.
+        fusion: Enable trigger module.
         debug: Enable debug output.
         backend: Backend to use ('simple' or 'pathway').
 
@@ -124,22 +160,35 @@ def cmd_debug(
     print("=" * 60)
     print(f"Frames: {frames}")
     print(f"Sample: every {sample}")
-    print(f"Extractor: {extractor}")
-    print(f"Fusion: {'enabled' if fusion else 'disabled'}")
+    print(f"Module: {extractor}")
+    print(f"Trigger: {'enabled' if fusion else 'disabled'}")
     print(f"Debug: {debug}")
     print(f"Backend: {backend}")
     print("=" * 60)
 
-    # Build pipeline
-    ext = DummyExtractor(extractor)
-    fusion_obj = DummyFusion() if fusion else None
+    # Build modules
+    analyzer = AnalyzerModule(extractor)
+    # Set trigger dependency to actual analyzer name
+    trigger = TriggerModule(depends_on=extractor) if fusion else None
 
+    # Combine into unified modules list
+    if trigger:
+        modules = [analyzer, trigger]
+    else:
+        modules = [analyzer]
+
+    # Build pipeline
     builder = FlowGraphBuilder().source("frames")
 
     if sample > 1:
         builder = builder.sample(every_nth=sample)
 
-    builder = builder.path("main", extractors=[ext], fusion=fusion_obj)
+    # Use legacy API for now (until PathNode supports modules directly)
+    if trigger:
+        builder = builder.path("main", extractors=[analyzer], fusion=trigger)
+    else:
+        builder = builder.path("main", extractors=[analyzer])
+
     graph = builder.build()
 
     # Generate frames
@@ -147,9 +196,9 @@ def cmd_debug(
 
     # Choose execution method
     if backend == "pathway":
-        return _run_pathway(graph, mock_frames, ext, fusion_obj, debug)
+        return _run_pathway(graph, mock_frames, analyzer, trigger, debug)
     else:
-        return _run_simple(graph, mock_frames, ext, fusion_obj, debug)
+        return _run_simple(graph, mock_frames, analyzer, trigger, debug)
 
 
 def _run_simple(graph, frames, ext, fusion_obj, debug: bool) -> int:
@@ -227,13 +276,13 @@ def _run_pathway(graph, frames, ext, fusion_obj, debug: bool) -> int:
     return 0
 
 
-def _print_results(frame_count, ext, fusion_obj, triggers):
+def _print_results(frame_count, analyzer, trigger, triggers):
     """Print execution results."""
     print("\n" + "=" * 60)
     print("[Results]")
     print(f"  Frames processed: {frame_count}")
-    print(f"  Extractor calls: {ext._count}")
-    if fusion_obj:
-        print(f"  Fusion calls: {fusion_obj._count}")
-        print(f"  Triggers: {len(triggers)}")
+    print(f"  Analyzer calls: {analyzer._count}")
+    if trigger:
+        print(f"  Trigger calls: {trigger._count}")
+        print(f"  Triggers fired: {len(triggers)}")
     print("=" * 60)
