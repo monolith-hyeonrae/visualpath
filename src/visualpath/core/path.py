@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion, FusionResult
+from visualpath.core.extractor import Observation
+from visualpath.core.module import Module
 from visualpath.core.isolation import IsolationLevel, IsolationConfig
 
 if TYPE_CHECKING:
@@ -65,8 +65,8 @@ class Path:
     def __init__(
         self,
         name: str,
-        extractors: List[BaseExtractor],
-        fusion: Optional[BaseFusion] = None,
+        extractors: List[Module],
+        fusion: Optional[Module] = None,
         isolation_config: Optional[IsolationConfig] = None,
         parallel: bool = True,
         max_workers: Optional[int] = None,
@@ -97,12 +97,12 @@ class Path:
         return self._name
 
     @property
-    def extractors(self) -> List[BaseExtractor]:
+    def extractors(self) -> List[Module]:
         """Get the list of extractors."""
         return self._extractors
 
     @property
-    def fusion(self) -> Optional[BaseFusion]:
+    def fusion(self) -> Optional[Module]:
         """Get the fusion module."""
         return self._fusion
 
@@ -237,7 +237,7 @@ class Path:
 
     def _call_extract(
         self,
-        extractor: BaseExtractor,
+        extractor: Module,
         frame: "Frame",
         deps: Optional[Dict[str, Observation]],
     ) -> Optional[Observation]:
@@ -287,14 +287,14 @@ class Path:
 
         return observations
 
-    def process(self, frame: "Frame") -> List[FusionResult]:
+    def process(self, frame: "Frame") -> List[Observation]:
         """Process a frame through extractors and fusion.
 
         Args:
             frame: The input frame to process.
 
         Returns:
-            List of fusion results from processing observations.
+            List of Observations from fusion processing.
         """
         observations = self.extract_all(frame)
 
@@ -304,7 +304,11 @@ class Path:
 
         results = []
         for obs in observations:
-            result = self._fusion.update(obs)
+            # Support both Module.update() and Module.process()
+            if hasattr(self._fusion, 'update'):
+                result = self._fusion.update(obs)
+            else:
+                result = self._fusion.process(frame, {obs.source: obs})
             results.append(result)
 
         return results
@@ -386,14 +390,14 @@ class PathOrchestrator:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.cleanup()
 
-    def process_all(self, frame: "Frame") -> Dict[str, List[FusionResult]]:
+    def process_all(self, frame: "Frame") -> Dict[str, List[Observation]]:
         """Process a frame through all paths.
 
         Args:
             frame: The input frame to process.
 
         Returns:
-            Dict mapping path names to their fusion results.
+            Dict mapping path names to their Observations.
         """
         if not self._initialized:
             raise RuntimeError("Orchestrator not initialized. Use context manager or call initialize().")
@@ -403,14 +407,14 @@ class PathOrchestrator:
         else:
             return self._process_sequential(frame)
 
-    def _process_sequential(self, frame: "Frame") -> Dict[str, List[FusionResult]]:
+    def _process_sequential(self, frame: "Frame") -> Dict[str, List[Observation]]:
         """Process paths sequentially."""
         results = {}
         for path in self._paths:
             results[path.name] = path.process(frame)
         return results
 
-    def _process_parallel(self, frame: "Frame") -> Dict[str, List[FusionResult]]:
+    def _process_parallel(self, frame: "Frame") -> Dict[str, List[Observation]]:
         """Process paths in parallel."""
         if self._executor is None:
             return self._process_sequential(frame)

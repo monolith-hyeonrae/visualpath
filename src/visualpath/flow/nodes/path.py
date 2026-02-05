@@ -14,8 +14,6 @@ from visualpath.flow.node import FlowNode
 from visualpath.flow.specs import ExtractSpec, ModuleSpec, NodeSpec
 
 if TYPE_CHECKING:
-    from visualpath.core.extractor import BaseExtractor
-    from visualpath.core.fusion import BaseFusion
     from visualpath.core.module import Module
     from visualpath.core.path import Path
 
@@ -44,8 +42,8 @@ class PathNode(FlowNode):
         # Unified modules API
         modules: Optional[List["Module"]] = None,
         # Legacy API
-        extractors: Optional[List["BaseExtractor"]] = None,
-        fusion: Optional["BaseFusion"] = None,
+        extractors: Optional[List["Module"]] = None,
+        fusion: Optional["Module"] = None,
         run_fusion: bool = True,
         # Shared options
         parallel: bool = False,

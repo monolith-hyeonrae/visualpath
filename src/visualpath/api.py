@@ -7,9 +7,6 @@ customization when needed.
 Quick Start:
     >>> import visualpath as vp
     >>>
-    >>> # Process a video with built-in extractors
-    >>> result = vp.process_video("video.mp4", extractors=["face", "pose"])
-    >>>
     >>> # Define a custom extractor
     >>> @vp.extractor("brightness")
     >>> def check_brightness(frame):
@@ -22,8 +19,8 @@ Quick Start:
     ...     if face.get("happy", 0) > 0.5:
     ...         return vp.trigger("smile", score=face["happy"])
     >>>
-    >>> # Run with custom components
-    >>> vp.run("video.mp4", extractors=["brightness"], fusion=smile_detector)
+    >>> # Run with modules
+    >>> result = vp.process_video("video.mp4", modules=[check_brightness, smile_detector])
 """
 
 from dataclasses import dataclass, field
@@ -37,8 +34,8 @@ from typing import (
 
 from visualbase import Frame, Trigger
 
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion, FusionResult
+from visualpath.core.extractor import Observation
+from visualpath.core.module import Module
 
 
 # =============================================================================
@@ -60,7 +57,7 @@ _extractor_registry: Dict[str, "FunctionExtractor"] = {}
 _fusion_registry: Dict[str, "FunctionFusion"] = {}
 
 
-def get_extractor(name: str) -> Optional[BaseExtractor]:
+def get_extractor(name: str) -> Optional[Module]:
     """Get a registered extractor by name.
 
     First checks function-based extractors, then plugin registry.
@@ -80,8 +77,11 @@ def get_extractor(name: str) -> Optional[BaseExtractor]:
     return None
 
 
-def get_fusion(name: str) -> Optional[BaseFusion]:
-    """Get a registered fusion by name."""
+def get_fusion(name: str) -> Optional[Module]:
+    """Get a registered fusion by name.
+
+    Returns a Module instance (FunctionFusion or plugin-discovered fusion).
+    """
     if name in _fusion_registry:
         return _fusion_registry[name]
 
@@ -129,7 +129,7 @@ def list_fusions() -> List[str]:
 ExtractFn = Callable[[Frame], Optional[Dict[str, Any]]]
 
 
-class FunctionExtractor(BaseExtractor):
+class FunctionExtractor(Module):
     """Extractor wrapper for simple functions.
 
     Wraps a function that takes a Frame and returns a dict of signals.
@@ -157,7 +157,7 @@ class FunctionExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame: Frame) -> Optional[Observation]:
+    def process(self, frame: Frame, deps=None) -> Optional[Observation]:
         result = self._fn(frame)
         if result is None:
             return None
@@ -269,12 +269,16 @@ def trigger(reason: str, score: float = 1.0, **metadata) -> TriggerSpec:
     return TriggerSpec(reason=reason, score=score, metadata=metadata)
 
 
-class FunctionFusion(BaseFusion):
+class FunctionFusion(Module):
     """Fusion wrapper for simple functions.
 
     Wraps a function that takes observation dicts and returns a TriggerSpec.
     Handles cooldown, gate logic, and state management automatically.
+
+    Returns Observation with trigger info in signals/metadata.
     """
+
+    depends: List[str] = []  # Will be set from sources
 
     def __init__(
         self,
@@ -288,6 +292,7 @@ class FunctionFusion(BaseFusion):
         self._name = name
         self._fn = fn
         self._sources = sources
+        self.depends = sources  # Set depends from sources
         self._cooldown_sec = cooldown
         self._gate_sources = gate_sources or []
 
@@ -301,7 +306,86 @@ class FunctionFusion(BaseFusion):
     def name(self) -> str:
         return self._name
 
-    def update(self, observation: Observation) -> FusionResult:
+    @property
+    def is_trigger(self) -> bool:
+        return True
+
+    def process(self, frame: Frame, deps: Optional[Dict[str, Observation]] = None) -> Observation:
+        """Process frame with dependencies and decide on trigger."""
+        t_ns = getattr(frame, "t_src_ns", 0)
+        frame_id = getattr(frame, "frame_id", 0)
+        self._last_t_ns = t_ns
+
+        # Build no-trigger result helper
+        def no_trigger(state: str = "no_trigger") -> Observation:
+            return Observation(
+                source=self._name,
+                frame_id=frame_id,
+                t_ns=t_ns,
+                signals={
+                    "should_trigger": False,
+                    "trigger_score": 0.0,
+                    "trigger_reason": "",
+                },
+                metadata={"state": state},
+            )
+
+        # Update latest from deps
+        if deps:
+            for src, obs in deps.items():
+                obs_dict = dict(obs.signals)
+                if obs.data:
+                    if isinstance(obs.data, dict):
+                        obs_dict.update(obs.data)
+                    else:
+                        obs_dict["data"] = obs.data
+                self._latest[src] = obs_dict
+
+        # Check cooldown
+        if self.in_cooldown:
+            return no_trigger("cooldown")
+
+        # Check if we have all required sources
+        if not all(src in self._latest for src in self._sources):
+            return no_trigger("missing_sources")
+
+        # Call the fusion function
+        args = [self._latest[src] for src in self._sources]
+
+        try:
+            result = self._fn(*args)
+        except Exception:
+            return no_trigger("error")
+
+        if result is None:
+            return no_trigger()
+
+        # Create trigger
+        self._cooldown_until_ns = t_ns + int(self._cooldown_sec * 1e9)
+
+        trig = Trigger.point(
+            event_time_ns=t_ns,
+            pre_sec=DEFAULT_PRE_SEC,
+            post_sec=DEFAULT_POST_SEC,
+            label=result.reason,
+            score=result.score,
+            metadata=result.metadata,
+        )
+
+        return Observation(
+            source=self._name,
+            frame_id=frame_id,
+            t_ns=t_ns,
+            signals={
+                "should_trigger": True,
+                "trigger_score": result.score,
+                "trigger_reason": result.reason,
+            },
+            metadata={"trigger": trig},
+        )
+
+    def update(self, observation: Observation) -> Observation:
+        """Legacy API: update with observation (for legacy fusion compatibility)."""
         self._last_t_ns = observation.t_ns
 
         # Store latest observation
@@ -314,13 +398,27 @@ class FunctionFusion(BaseFusion):
 
         self._latest[observation.source] = obs_dict
 
+        # Build no-trigger result helper
+        def no_trigger(state: str = "no_trigger") -> Observation:
+            return Observation(
+                source=self._name,
+                frame_id=observation.frame_id,
+                t_ns=observation.t_ns,
+                signals={
+                    "should_trigger": False,
+                    "trigger_score": 0.0,
+                    "trigger_reason": "",
+                },
+                metadata={"state": state},
+            )
+
         # Check cooldown
         if self.in_cooldown:
-            return FusionResult(should_trigger=False)
+            return no_trigger("cooldown")
 
         # Check if we have all required sources
         if not all(src in self._latest for src in self._sources):
-            return FusionResult(should_trigger=False)
+            return no_trigger("missing_sources")
 
         # Call the fusion function
         args = [self._latest[src] for src in self._sources]
@@ -328,10 +426,10 @@ class FunctionFusion(BaseFusion):
         try:
             result = self._fn(*args)
         except Exception:
-            return FusionResult(should_trigger=False)
+            return no_trigger("error")
 
         if result is None:
-            return FusionResult(should_trigger=False)
+            return no_trigger()
 
         # Create trigger
         self._cooldown_until_ns = observation.t_ns + int(self._cooldown_sec * 1e9)
@@ -345,11 +443,16 @@ class FunctionFusion(BaseFusion):
             metadata=result.metadata,
         )
 
-        return FusionResult(
-            should_trigger=True,
-            trigger=trig,
-            score=result.score,
-            reason=result.reason,
+        return Observation(
+            source=self._name,
+            frame_id=observation.frame_id,
+            t_ns=observation.t_ns,
+            signals={
+                "should_trigger": True,
+                "trigger_score": result.score,
+                "trigger_reason": result.reason,
+            },
+            metadata={"trigger": trig},
         )
 
     def reset(self) -> None:

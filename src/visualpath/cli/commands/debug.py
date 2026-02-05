@@ -65,7 +65,10 @@ class AnalyzerModule:
 
 
 class TriggerModule:
-    """Unified Module that produces FusionResult (trigger)."""
+    """Unified Module that produces Observation (trigger).
+
+    Returns Observation with trigger info in signals/metadata.
+    """
 
     def __init__(self, name: str = "trigger", threshold: float = 0.3, depends_on: str = None):
         self._name = name
@@ -84,7 +87,7 @@ class TriggerModule:
         return True
 
     def process(self, frame, deps=None):
-        from visualpath.core import FusionResult
+        from visualpath.core import Observation
         self._count += 1
 
         # Get observation from deps (try multiple keys)
@@ -101,7 +104,12 @@ class TriggerModule:
                         break
 
         if not obs:
-            return FusionResult(should_trigger=False)
+            return Observation(
+                source=self._name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"should_trigger": False, "trigger_score": 0.0, "trigger_reason": ""},
+            )
 
         value = obs.signals.get("value", 0)
 
@@ -114,8 +122,23 @@ class TriggerModule:
                 label="cli_test",
                 score=value,
             )
-            return FusionResult(should_trigger=True, trigger=trigger, score=value)
-        return FusionResult(should_trigger=False)
+            return Observation(
+                source=self._name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": value,
+                    "trigger_reason": "cli_test",
+                },
+                metadata={"trigger": trigger},
+            )
+        return Observation(
+            source=self._name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False, "trigger_score": 0.0, "trigger_reason": ""},
+        )
 
     def initialize(self) -> None:
         pass

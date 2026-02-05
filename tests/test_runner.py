@@ -5,12 +5,11 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List
 
-from visualpath.core import BaseExtractor, Observation, BaseFusion, FusionResult
+from visualpath.core import Module, Observation
 from visualpath.runner import (
     ProcessResult,
     _get_backend,
-    _resolve_extractors,
-    _resolve_fusion,
+    _resolve_modules,
 )
 from visualpath.backends.base import PipelineResult
 from visualpath.backends.simple import SimpleBackend
@@ -29,7 +28,7 @@ except ImportError:
 # =============================================================================
 
 
-class CountingExtractor(BaseExtractor):
+class CountingExtractor(Module):
     """Extractor that counts calls."""
 
     def __init__(self, name: str, value: float = 0.5):
@@ -41,7 +40,7 @@ class CountingExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -103,21 +102,21 @@ class TestGetBackend:
 
 
 # =============================================================================
-# _resolve_extractors Tests
+# _resolve_modules Tests
 # =============================================================================
 
 
-class TestResolveExtractors:
-    """Tests for _resolve_extractors."""
+class TestResolveModules:
+    """Tests for _resolve_modules."""
 
     def test_resolve_instance(self):
         ext = CountingExtractor("test")
-        result = _resolve_extractors([ext])
+        result = _resolve_modules([ext])
         assert result == [ext]
 
     def test_resolve_unknown_name(self):
-        with pytest.raises(ValueError, match="Unknown extractor"):
-            _resolve_extractors(["nonexistent_extractor"])
+        with pytest.raises(ValueError, match="Unknown module"):
+            _resolve_modules(["nonexistent_module"])
 
     def test_resolve_registered_name(self):
         import visualpath as vp
@@ -129,7 +128,7 @@ class TestResolveExtractors:
             return {"x": 1.0}
 
         try:
-            result = _resolve_extractors(["test_resolve_ext"])
+            result = _resolve_modules(["test_resolve_ext"])
             assert len(result) == 1
             assert result[0].name == "test_resolve_ext"
         finally:
@@ -146,47 +145,12 @@ class TestResolveExtractors:
         instance = CountingExtractor("inst")
 
         try:
-            result = _resolve_extractors(["test_resolve_mix", instance])
+            result = _resolve_modules(["test_resolve_mix", instance])
             assert len(result) == 2
         finally:
             _extractor_registry.pop("test_resolve_mix", None)
 
-
-# =============================================================================
-# _resolve_fusion Tests
-# =============================================================================
-
-
-class TestResolveFusion:
-    """Tests for _resolve_fusion."""
-
-    def test_resolve_none(self):
-        assert _resolve_fusion(None) is None
-
-    def test_resolve_unknown_name(self):
-        with pytest.raises(ValueError, match="Unknown fusion"):
-            _resolve_fusion("nonexistent_fusion")
-
-    def test_resolve_instance(self):
-        class DummyFusion(BaseFusion):
-            def update(self, obs):
-                return FusionResult(should_trigger=False)
-
-            def reset(self):
-                pass
-
-            @property
-            def is_gate_open(self):
-                return True
-
-            @property
-            def in_cooldown(self):
-                return False
-
-        fusion = DummyFusion()
-        assert _resolve_fusion(fusion) is fusion
-
-    def test_resolve_registered_name(self):
+    def test_resolve_fusion_registered_name(self):
         import visualpath as vp
         from visualpath.api import _fusion_registry
 
@@ -195,9 +159,9 @@ class TestResolveFusion:
             pass
 
         try:
-            result = _resolve_fusion("test_resolve_fus")
-            assert result is not None
-            assert result.name == "test_resolve_fus"
+            result = _resolve_modules(["test_resolve_fus"])
+            assert len(result) == 1
+            assert result[0].name == "test_resolve_fus"
         finally:
             _fusion_registry.pop("test_resolve_fus", None)
 

@@ -5,8 +5,8 @@ visualpath provides a plugin-based platform for building video analysis pipeline
 Quick Start:
     >>> import visualpath as vp
     >>>
-    >>> # Process a video
-    >>> result = vp.process_video("video.mp4", extractors=["face", "pose"])
+    >>> # Process a video with modules (preferred)
+    >>> result = vp.process_video("video.mp4", modules=[face_detector, smile_trigger])
     >>>
     >>> # Create a custom extractor (decorator)
     >>> @vp.extractor("brightness")
@@ -20,7 +20,7 @@ Quick Start:
     ...         return vp.trigger("smile", score=face["happy"])
 
 For advanced usage, see:
-- visualpath.core: BaseExtractor, BaseFusion, Observation, FusionResult
+- visualpath.core: Module, Observation (unified API)
 - visualpath.flow: FlowGraph, DAG-based pipeline
 - visualpath.process: Distributed processing (IPC, workers)
 """
@@ -62,8 +62,8 @@ from visualpath.runner import (
 # =============================================================================
 # Core exports (for advanced use)
 # =============================================================================
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion, FusionResult
+from visualpath.core.module import Module
+from visualpath.core.extractor import Observation, DummyExtractor
 from visualpath.core.isolation import IsolationLevel, IsolationConfig
 from visualpath.core.path import Path, PathConfig, PathOrchestrator
 
@@ -85,11 +85,10 @@ __all__ = [
     "list_fusions",
     "ProcessResult",
     "TriggerSpec",
-    # Core (advanced)
-    "BaseExtractor",
+    # Core (unified API)
+    "Module",
     "Observation",
-    "BaseFusion",
-    "FusionResult",
+    "DummyExtractor",
     "IsolationLevel",
     "IsolationConfig",
     "Path",

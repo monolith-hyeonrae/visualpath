@@ -47,7 +47,8 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
-from visualpath.core.extractor import BaseExtractor, Observation
+from visualpath.core.extractor import Observation
+from visualpath.core.module import Module
 from visualpath.core.isolation import IsolationLevel
 
 if TYPE_CHECKING:
@@ -113,7 +114,7 @@ class InlineWorker(BaseWorker):
     Suitable for lightweight extractors that don't need isolation.
     """
 
-    def __init__(self, extractor: BaseExtractor):
+    def __init__(self, extractor: Module):
         """Initialize the inline worker.
 
         Args:
@@ -145,10 +146,17 @@ class InlineWorker(BaseWorker):
                     for name in self._extractor.depends
                     if name in deps
                 }
-            try:
-                obs = self._extractor.extract(frame, extractor_deps)
-            except TypeError:
-                obs = self._extractor.extract(frame)
+            # Support both Module.process() and legacy extract()
+            if hasattr(self._extractor, 'process') and not hasattr(self._extractor, 'extract'):
+                try:
+                    obs = self._extractor.process(frame, extractor_deps)
+                except TypeError:
+                    obs = self._extractor.process(frame)
+            else:
+                try:
+                    obs = self._extractor.extract(frame, extractor_deps)
+                except TypeError:
+                    obs = self._extractor.extract(frame)
             elapsed_ms = (time.perf_counter() - start) * 1000
             return WorkerResult(observation=obs, timing_ms=elapsed_ms)
         except Exception as e:
@@ -169,7 +177,7 @@ class ThreadWorker(BaseWorker):
 
     def __init__(
         self,
-        extractor: BaseExtractor,
+        extractor: Module,
         queue_size: int = 10,
     ):
         """Initialize the thread worker.
@@ -217,10 +225,17 @@ class ThreadWorker(BaseWorker):
                 }
 
             def _do_extract():
-                try:
-                    return self._extractor.extract(frame, extractor_deps)
-                except TypeError:
-                    return self._extractor.extract(frame)
+                # Support both Module.process() and legacy extract()
+                if hasattr(self._extractor, 'process') and not hasattr(self._extractor, 'extract'):
+                    try:
+                        return self._extractor.process(frame, extractor_deps)
+                    except TypeError:
+                        return self._extractor.process(frame)
+                else:
+                    try:
+                        return self._extractor.extract(frame, extractor_deps)
+                    except TypeError:
+                        return self._extractor.extract(frame)
 
             future = self._executor.submit(_do_extract)
             obs = future.result()  # Blocking wait
@@ -416,7 +431,7 @@ class VenvWorker(BaseWorker):
 
     def __init__(
         self,
-        extractor: Optional[BaseExtractor],
+        extractor: Optional[Module],
         venv_path: str,
         extractor_name: Optional[str] = None,
         queue_size: int = 10,
@@ -762,7 +777,7 @@ class ProcessWorker(BaseWorker):
 
     def __init__(
         self,
-        extractor: Optional[BaseExtractor] = None,
+        extractor: Optional[Module] = None,
         extractor_name: Optional[str] = None,
         queue_size: int = 10,
         timeout_sec: float = 30.0,
@@ -828,7 +843,7 @@ class WorkerLauncher:
     @staticmethod
     def create(
         level: IsolationLevel,
-        extractor: Optional[BaseExtractor],
+        extractor: Optional[Module],
         venv_path: Optional[str] = None,
         extractor_name: Optional[str] = None,
         **kwargs,

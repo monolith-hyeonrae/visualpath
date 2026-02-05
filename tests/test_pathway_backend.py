@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict
 from unittest.mock import MagicMock, patch
 
-from visualpath.core import BaseExtractor, Observation, BaseFusion, FusionResult
+from visualpath.core import Module, Observation
 from visualpath.backends.base import ExecutionBackend, PipelineResult
 from visualpath.backends.simple import SimpleBackend
 
@@ -36,7 +36,7 @@ class MockFrame:
     data: np.ndarray
 
 
-class CountingExtractor(BaseExtractor):
+class CountingExtractor(Module):
     """Extractor that counts calls for testing."""
 
     def __init__(self, name: str, return_value: float = 0.5):
@@ -50,7 +50,7 @@ class CountingExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -66,8 +66,10 @@ class CountingExtractor(BaseExtractor):
         self._cleaned_up = True
 
 
-class ThresholdFusion(BaseFusion):
+class ThresholdFusion(Module):
     """Simple fusion for testing."""
+
+    depends = []
 
     def __init__(self, threshold: float = 0.5):
         self._threshold = threshold
@@ -76,8 +78,29 @@ class ThresholdFusion(BaseFusion):
         self._update_count = 0
         self._trigger_count = 0
 
-    def update(self, observation: Observation) -> FusionResult:
+    @property
+    def name(self) -> str:
+        return "threshold_fusion"
+
+    def process(self, frame, deps=None) -> Optional[Observation]:
+        """Process observations from deps and decide on trigger."""
         self._update_count += 1
+        # Find any observation from deps
+        observation = None
+        if deps:
+            for obs in deps.values():
+                if obs is not None:
+                    observation = obs
+                    break
+
+        if observation is None:
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"should_trigger": False},
+            )
+
         value = observation.signals.get("value", 0)
         if value > self._threshold:
             self._trigger_count += 1
@@ -90,26 +113,27 @@ class ThresholdFusion(BaseFusion):
                 label="threshold_exceeded",
                 score=value,
             )
-            return FusionResult(
-                should_trigger=True,
-                trigger=trigger,
-                score=value,
-                reason="threshold_exceeded",
-                observations_used=1,
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": value,
+                    "trigger_reason": "threshold_exceeded",
+                },
+                metadata={"trigger": trigger},
             )
-        return FusionResult(should_trigger=False)
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         self._update_count = 0
         self._trigger_count = 0
-
-    @property
-    def is_gate_open(self) -> bool:
-        return self._gate_open
-
-    @property
-    def in_cooldown(self) -> bool:
-        return self._cooldown
 
 
 def make_frame(frame_id: int = 1, t_ns: int = 1_000_000) -> MockFrame:
@@ -486,7 +510,7 @@ class TestPathwayExecution:
         from visualpath.backends.pathway import PathwayBackend
         from visualpath.flow.graph import FlowGraph
 
-        class ErrorExtractor(BaseExtractor):
+        class ErrorExtractor(Module):
             _name = "error"
             _initialized = False
             _cleaned_up = False
@@ -495,7 +519,7 @@ class TestPathwayExecution:
             def name(self):
                 return self._name
 
-            def extract(self, frame, deps=None):
+            def process(self, frame, deps=None):
                 raise RuntimeError("intentional")
 
             def initialize(self):
@@ -767,7 +791,7 @@ class TestAPIBackendParameter:
 # =============================================================================
 
 
-class UpstreamExtractor(BaseExtractor):
+class UpstreamExtractor(Module):
     """Extractor that produces observations used by dependent extractors."""
 
     def __init__(self, name: str = "upstream"):
@@ -778,7 +802,7 @@ class UpstreamExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -794,7 +818,7 @@ class UpstreamExtractor(BaseExtractor):
         pass
 
 
-class DependentExtractor(BaseExtractor):
+class DependentExtractor(Module):
     """Extractor that depends on upstream and records received deps."""
 
     depends = ["upstream"]
@@ -808,7 +832,7 @@ class DependentExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         self.received_deps.append(deps)
         upstream_value = None
@@ -868,7 +892,7 @@ class TestMultiExtractorUDFWithDeps:
         """Test deps accumulate for multi-level dependency chains."""
         from visualpath.backends.pathway.operators import create_multi_extractor_udf
 
-        class Level2Extractor(BaseExtractor):
+        class Level2Extractor(Module):
             depends = ["dependent"]
 
             def __init__(self):
@@ -878,7 +902,7 @@ class TestMultiExtractorUDFWithDeps:
             def name(self):
                 return "level2"
 
-            def extract(self, frame, deps=None):
+            def process(self, frame, deps=None):
                 self.received_deps.append(deps)
                 has_dep = deps is not None and "dependent" in deps
                 return Observation(

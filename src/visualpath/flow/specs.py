@@ -13,8 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from visualpath.core.extractor import BaseExtractor
-    from visualpath.core.fusion import BaseFusion
+    from visualpath.core.module import Module
     from visualpath.flow.node import FlowData, Condition
 
 

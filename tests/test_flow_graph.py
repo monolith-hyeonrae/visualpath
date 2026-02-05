@@ -6,10 +6,8 @@ from dataclasses import dataclass
 from typing import Optional, List
 
 from visualpath.core import (
-    BaseExtractor,
+    Module,
     Observation,
-    BaseFusion,
-    FusionResult,
 )
 from visualpath.flow import (
     FlowData,
@@ -41,8 +39,8 @@ class MockFrame:
     data: np.ndarray
 
 
-class CountingExtractor(BaseExtractor):
-    """Extractor that counts calls for testing."""
+class CountingModule(Module):
+    """Module that counts calls for testing."""
 
     def __init__(self, name: str, return_value: float = 0.5):
         self._name = name
@@ -55,7 +53,7 @@ class CountingExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -71,37 +69,54 @@ class CountingExtractor(BaseExtractor):
         self._cleaned_up = True
 
 
-class ThresholdFusion(BaseFusion):
-    """Simple fusion for testing."""
+class ThresholdTriggerModule(Module):
+    """Trigger module for testing."""
 
-    def __init__(self, threshold: float = 0.5):
+    def __init__(self, threshold: float = 0.5, depends_on: str = None):
         self._threshold = threshold
         self._gate_open = True
         self._cooldown = False
         self._update_count = 0
+        self._depends_on = depends_on
+        self.depends = [depends_on] if depends_on else []
 
-    def update(self, observation: Observation) -> FusionResult:
+    @property
+    def name(self) -> str:
+        return "threshold_trigger"
+
+    def process(self, frame, deps=None) -> Observation:
         self._update_count += 1
-        value = observation.signals.get("value", 0)
+        obs = None
+        if deps:
+            if self._depends_on and self._depends_on in deps:
+                obs = deps[self._depends_on]
+            else:
+                for v in deps.values():
+                    if hasattr(v, 'signals'):
+                        obs = v
+                        break
+
+        value = obs.signals.get("value", 0) if obs else 0
         if value > self._threshold:
-            return FusionResult(
-                should_trigger=True,
-                score=value,
-                reason="threshold_exceeded",
-                observations_used=1,
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": value,
+                    "trigger_reason": "threshold_exceeded",
+                },
             )
-        return FusionResult(should_trigger=False)
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         self._update_count = 0
-
-    @property
-    def is_gate_open(self) -> bool:
-        return self._gate_open
-
-    @property
-    def in_cooldown(self) -> bool:
-        return self._cooldown
 
 
 def make_frame(frame_id: int = 1, t_ns: int = 1_000_000) -> MockFrame:
@@ -299,7 +314,12 @@ class TestFlowGraph:
         graph.on_trigger(lambda d: triggered.append(d))
 
         # Create data with triggering result
-        result = FusionResult(should_trigger=True, score=0.9)
+        result = Observation(
+            source="trigger",
+            frame_id=1,
+            t_ns=1000000,
+            signals={"should_trigger": True, "trigger_score": 0.9},
+        )
         data = FlowData(results=[result])
 
         graph.fire_triggers(data)
@@ -308,7 +328,7 @@ class TestFlowGraph:
 
     def test_context_manager(self):
         """Test graph as context manager."""
-        ext = CountingExtractor("ext1")
+        ext = CountingModule("ext1")
         path = Path(name="test", extractors=[ext])
         path_node = PathNode(path=path)
 
@@ -335,7 +355,7 @@ class TestGraphExecutor:
 
     def test_simple_pipeline(self):
         """Test executing a simple pipeline."""
-        ext = CountingExtractor("ext1", return_value=0.7)
+        ext = CountingModule("ext1", return_value=0.7)
         path = Path(name="test", extractors=[ext])
         path_node = PathNode(path=path, run_fusion=False)
 
@@ -401,9 +421,9 @@ class TestGraphExecutor:
 
     def test_trigger_callback(self):
         """Test trigger callback is called."""
-        ext = CountingExtractor("ext1", return_value=0.7)
-        fusion = ThresholdFusion(threshold=0.5)
-        path = Path(name="test", extractors=[ext], fusion=fusion)
+        ext = CountingModule("ext1", return_value=0.7)
+        trigger = ThresholdTriggerModule(threshold=0.5, depends_on="ext1")
+        path = Path(name="test", extractors=[ext], fusion=trigger)
         path_node = PathNode(path=path, run_fusion=True)
 
         graph = FlowGraph()
@@ -476,7 +496,7 @@ class TestFlowGraphBuilder:
 
     def test_build_with_extractors(self):
         """Test building with extractors."""
-        ext = CountingExtractor("ext1")
+        ext = CountingModule("ext1")
 
         graph = (FlowGraphBuilder()
             .register_extractor("ext1", ext)
@@ -510,8 +530,8 @@ class TestFlowGraphBuilder:
 
     def test_build_with_join(self):
         """Test building with join."""
-        ext_a = CountingExtractor("ext_a")
-        ext_b = CountingExtractor("ext_b")
+        ext_a = CountingModule("ext_a")
+        ext_b = CountingModule("ext_b")
 
         graph = (FlowGraphBuilder()
             .source("frames")
@@ -533,7 +553,12 @@ class TestFlowGraphBuilder:
             .build())
 
         # Verify callback was registered
-        result = FusionResult(should_trigger=True, score=0.9)
+        result = Observation(
+            source="trigger",
+            frame_id=1,
+            t_ns=1000000,
+            signals={"should_trigger": True, "trigger_score": 0.9},
+        )
         data = FlowData(results=[result])
         graph.fire_triggers(data)
 
@@ -613,15 +638,15 @@ class TestFlowIntegration:
 
     def test_complete_pipeline(self):
         """Test a complete pipeline with sampling, extraction, and fusion."""
-        ext = CountingExtractor("ext1", return_value=0.7)
-        fusion = ThresholdFusion(threshold=0.5)
+        ext = CountingModule("ext1", return_value=0.7)
+        trigger = ThresholdTriggerModule(threshold=0.5, depends_on="ext1")
 
         triggered = []
 
         graph = (FlowGraphBuilder()
             .source("frames")
             .sample(every_nth=2)
-            .path("main", extractors=[ext], fusion=fusion)
+            .path("main", extractors=[ext], fusion=trigger)
             .on_trigger(lambda d: triggered.append(d))
             .build())
 
@@ -638,8 +663,8 @@ class TestFlowIntegration:
 
     def test_branching_pipeline(self):
         """Test pipeline with conditional branching."""
-        ext_human = CountingExtractor("human_ext")
-        ext_scene = CountingExtractor("scene_ext")
+        ext_human = CountingModule("human_ext")
+        ext_scene = CountingModule("scene_ext")
 
         frame_count = [0]
 
@@ -671,7 +696,7 @@ class TestFlowIntegration:
 
     def test_from_pipeline_basic(self):
         """Test FlowGraph.from_pipeline() creates correct graph."""
-        ext = CountingExtractor("ext1", return_value=0.7)
+        ext = CountingModule("ext1", return_value=0.7)
 
         graph = FlowGraph.from_pipeline([ext])
 
@@ -684,17 +709,17 @@ class TestFlowIntegration:
 
     def test_from_pipeline_with_fusion(self):
         """Test FlowGraph.from_pipeline() with fusion."""
-        ext = CountingExtractor("ext1", return_value=0.7)
-        fusion = ThresholdFusion(threshold=0.5)
+        ext = CountingModule("ext1", return_value=0.7)
+        trigger = ThresholdTriggerModule(threshold=0.5, depends_on="ext1")
 
-        graph = FlowGraph.from_pipeline([ext], fusion=fusion)
+        graph = FlowGraph.from_pipeline([ext], fusion=trigger)
 
         assert "source" in graph.nodes
         assert "pipeline" in graph.nodes
 
     def test_from_pipeline_with_on_trigger(self):
         """Test FlowGraph.from_pipeline() with on_trigger callback."""
-        ext = CountingExtractor("ext1", return_value=0.7)
+        ext = CountingModule("ext1", return_value=0.7)
         triggered = []
 
         graph = FlowGraph.from_pipeline(
@@ -703,7 +728,12 @@ class TestFlowIntegration:
         )
 
         # Fire a trigger to verify callback was registered
-        result = FusionResult(should_trigger=True, score=0.9)
+        result = Observation(
+            source="trigger",
+            frame_id=1,
+            t_ns=1000000,
+            signals={"should_trigger": True, "trigger_score": 0.9},
+        )
         data = FlowData(results=[result])
         graph.fire_triggers(data)
 
@@ -711,8 +741,8 @@ class TestFlowIntegration:
 
     def test_from_pipeline_multiple_extractors(self):
         """Test FlowGraph.from_pipeline() with multiple extractors."""
-        ext1 = CountingExtractor("ext1", return_value=0.3)
-        ext2 = CountingExtractor("ext2", return_value=0.7)
+        ext1 = CountingModule("ext1", return_value=0.3)
+        ext2 = CountingModule("ext2", return_value=0.7)
 
         graph = FlowGraph.from_pipeline([ext1, ext2])
 
@@ -722,8 +752,8 @@ class TestFlowIntegration:
 
     def test_parallel_paths_with_join(self):
         """Test parallel processing paths that join."""
-        ext_a = CountingExtractor("ext_a", return_value=0.3)
-        ext_b = CountingExtractor("ext_b", return_value=0.5)
+        ext_a = CountingModule("ext_a", return_value=0.3)
+        ext_b = CountingModule("ext_b", return_value=0.5)
 
         graph = (FlowGraphBuilder()
             .source("frames")
@@ -758,7 +788,7 @@ class TestFlowGraphVisualization:
 
     def test_to_dot_simple(self):
         """Test DOT output for a simple pipeline."""
-        ext = CountingExtractor("test")
+        ext = CountingModule("test")
         graph = FlowGraph.from_pipeline([ext])
         dot = graph.to_dot()
 
@@ -798,7 +828,7 @@ class TestFlowGraphVisualization:
 
     def test_print_ascii(self):
         """Test ASCII output for a simple pipeline."""
-        ext = CountingExtractor("test")
+        ext = CountingModule("test")
         graph = FlowGraph.from_pipeline([ext])
         ascii_repr = graph.print_ascii()
 
@@ -813,7 +843,7 @@ class TestFlowGraphVisualization:
 # =============================================================================
 
 
-class AnalyzerModule:
+class AnalyzerModule(Module):
     """Test module that produces Observation."""
 
     depends: List[str] = []
@@ -843,8 +873,8 @@ class AnalyzerModule:
         pass
 
 
-class TriggerModule:
-    """Test module that produces FusionResult (trigger)."""
+class TriggerModuleNew(Module):
+    """Test module that produces trigger Observation."""
 
     def __init__(self, name: str = "trigger", threshold: float = 0.3, depends_on: str = None):
         self._name = name
@@ -861,7 +891,7 @@ class TriggerModule:
     def is_trigger(self) -> bool:
         return True
 
-    def process(self, frame, deps=None) -> FusionResult:
+    def process(self, frame, deps=None) -> Observation:
         self._count += 1
         obs = None
         if deps:
@@ -874,12 +904,27 @@ class TriggerModule:
                         break
 
         if not obs:
-            return FusionResult(should_trigger=False)
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"should_trigger": False},
+            )
 
         value = obs.signals.get("value", 0)
         if value > self._threshold:
-            return FusionResult(should_trigger=True, score=value)
-        return FusionResult(should_trigger=False)
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"should_trigger": True, "trigger_score": value},
+            )
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def initialize(self) -> None:
         pass
@@ -894,7 +939,7 @@ class TestUnifiedModulesAPI:
     def test_pathnode_with_modules(self):
         """Test PathNode accepts modules parameter."""
         analyzer = AnalyzerModule("test_analyzer")
-        trigger = TriggerModule("test_trigger", depends_on="test_analyzer")
+        trigger = TriggerModuleNew("test_trigger", depends_on="test_analyzer")
 
         node = PathNode(name="test", modules=[analyzer, trigger])
 
@@ -918,7 +963,7 @@ class TestUnifiedModulesAPI:
         """Test PathNode with extractors generates ExtractSpec (legacy)."""
         from visualpath.flow.specs import ExtractSpec
 
-        ext = CountingExtractor("ext")
+        ext = CountingModule("ext")
         node = PathNode(name="legacy", extractors=[ext])
 
         spec = node.spec
@@ -935,7 +980,7 @@ class TestUnifiedModulesAPI:
     def test_builder_path_with_modules(self):
         """Test FlowGraphBuilder.path() with modules parameter."""
         analyzer = AnalyzerModule("analyzer")
-        trigger = TriggerModule("trigger", depends_on="analyzer")
+        trigger = TriggerModuleNew("trigger", depends_on="analyzer")
 
         graph = (FlowGraphBuilder()
             .source("frames")
@@ -968,7 +1013,7 @@ class TestUnifiedModulesAPI:
     def test_executor_with_modules(self):
         """Test GraphExecutor runs modules correctly."""
         analyzer = AnalyzerModule("analyzer", value=0.5)
-        trigger = TriggerModule("trigger", threshold=0.3, depends_on="analyzer")
+        trigger = TriggerModuleNew("trigger", threshold=0.3, depends_on="analyzer")
 
         graph = (FlowGraphBuilder()
             .source("frames")
@@ -992,7 +1037,7 @@ class TestUnifiedModulesAPI:
     def test_executor_modules_no_trigger(self):
         """Test executor when trigger condition is not met."""
         analyzer = AnalyzerModule("analyzer", value=0.1)  # Below threshold
-        trigger = TriggerModule("trigger", threshold=0.3, depends_on="analyzer")
+        trigger = TriggerModuleNew("trigger", threshold=0.3, depends_on="analyzer")
 
         graph = (FlowGraphBuilder()
             .source("frames")
@@ -1017,7 +1062,7 @@ class TestUnifiedModulesAPI:
         init_called = []
         cleanup_called = []
 
-        class TrackingModule:
+        class TrackingModule(Module):
             depends = []
 
             def __init__(self, name):

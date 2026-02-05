@@ -28,7 +28,7 @@ Example:
 import sys
 from typing import Dict, Optional, Type, Any
 
-from visualpath.core.extractor import BaseExtractor
+from visualpath.core.module import Module
 
 # Entry point group names
 EXTRACTORS_GROUP = "visualpath.extractors"
@@ -90,7 +90,7 @@ def discover_fusions() -> Dict[str, Any]:
     return _get_entry_points(FUSIONS_GROUP)
 
 
-def load_extractor(name: str) -> Type[BaseExtractor]:
+def load_extractor(name: str) -> Type[Module]:
     """Load an extractor class by name.
 
     Args:
@@ -140,7 +140,7 @@ def load_fusion(name: str) -> Type:
     return entry_point.load()
 
 
-def create_extractor(name: str, **kwargs) -> BaseExtractor:
+def create_extractor(name: str, **kwargs) -> Module:
     """Create an extractor instance by name.
 
     Convenience function that loads and instantiates an extractor.
@@ -172,14 +172,14 @@ class PluginRegistry:
 
     def __init__(self):
         """Initialize the plugin registry."""
-        self._extractors: Dict[str, Type[BaseExtractor]] = {}
+        self._extractors: Dict[str, Type[Module]] = {}
         self._fusions: Dict[str, Type] = {}
-        self._instances: Dict[str, BaseExtractor] = {}
+        self._instances: Dict[str, Module] = {}
 
     def register_extractor(
         self,
         name: str,
-        extractor_class: Type[BaseExtractor],
+        extractor_class: Type[Module],
     ) -> None:
         """Register an extractor class.
 
@@ -198,7 +198,7 @@ class PluginRegistry:
         """
         self._fusions[name] = fusion_class
 
-    def get_extractor_class(self, name: str) -> Type[BaseExtractor]:
+    def get_extractor_class(self, name: str) -> Type[Module]:
         """Get a registered extractor class.
 
         Args:
@@ -220,7 +220,7 @@ class PluginRegistry:
         name: str,
         singleton: bool = False,
         **kwargs,
-    ) -> BaseExtractor:
+    ) -> Module:
         """Create an extractor instance.
 
         Args:

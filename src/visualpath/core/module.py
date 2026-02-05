@@ -7,10 +7,10 @@ a single, consistent interface.
 A Module:
 - Has a unique name
 - Can declare dependencies on other modules
-- Processes frames and produces outputs (Observation or FusionResult)
+- Processes frames and produces Observations
 - Manages its own lifecycle (initialize/cleanup)
 
-Example - Analysis module (produces Observation):
+Example - Analysis module:
     >>> class FaceDetector(Module):
     ...     @property
     ...     def name(self) -> str:
@@ -26,7 +26,7 @@ Example - Analysis module (produces Observation):
     ...             data={"faces": faces},
     ...         )
 
-Example - Trigger module (produces FusionResult):
+Example - Trigger module:
     >>> class SmileTrigger(Module):
     ...     depends = ["face_detect", "expression"]
     ...
@@ -34,56 +34,67 @@ Example - Trigger module (produces FusionResult):
     ...     def name(self) -> str:
     ...         return "smile_trigger"
     ...
-    ...     def process(self, frame, deps=None) -> FusionResult:
+    ...     def process(self, frame, deps=None) -> Observation:
     ...         expr_obs = deps.get("expression") if deps else None
     ...         if not expr_obs:
-    ...             return FusionResult(should_trigger=False)
+    ...             return Observation(
+    ...                 source=self.name,
+    ...                 frame_id=frame.frame_id,
+    ...                 t_ns=frame.t_src_ns,
+    ...                 signals={"should_trigger": False},
+    ...             )
     ...
     ...         smile_score = expr_obs.signals.get("smile", 0)
     ...         if smile_score > 0.8:
-    ...             return FusionResult(
-    ...                 should_trigger=True,
-    ...                 trigger=Trigger.point(...),
-    ...                 score=smile_score,
+    ...             return Observation(
+    ...                 source=self.name,
+    ...                 frame_id=frame.frame_id,
+    ...                 t_ns=frame.t_src_ns,
+    ...                 signals={
+    ...                     "should_trigger": True,
+    ...                     "trigger_score": smile_score,
+    ...                     "trigger_reason": "smile_detected",
+    ...                 },
+    ...                 metadata={"trigger": Trigger.point(...)},
     ...             )
-    ...         return FusionResult(should_trigger=False)
+    ...         return Observation(
+    ...             source=self.name,
+    ...             frame_id=frame.frame_id,
+    ...             t_ns=frame.t_src_ns,
+    ...             signals={"should_trigger": False},
+    ...         )
 
 Dependency chain example:
-    >>> # face_detect → expression → smile_trigger
+    >>> # face_detect -> expression -> smile_trigger
     >>> modules = [FaceDetector(), ExpressionAnalyzer(), SmileTrigger()]
     >>> # Dependencies are resolved automatically by name
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Union, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from visualbase import Frame
     from visualpath.core.extractor import Observation
-    from visualpath.core.fusion import FusionResult
 
-
-# Type alias for module outputs
-ModuleOutput = Union["Observation", "FusionResult", None]
 
 # Type alias for dependency context
-DepsContext = Optional[Dict[str, Union["Observation", "FusionResult"]]]
+DepsContext = Optional[Dict[str, "Observation"]]
 
 
 class Module(ABC):
     """Base class for all processing modules.
 
     Modules are the building blocks of visualpath pipelines. Each module
-    processes frames and produces outputs that can be consumed by other
-    modules downstream.
+    processes frames and produces Observations that can be consumed by
+    other modules downstream.
 
-    Output types:
-    - Observation: Analysis results (features, detections, etc.)
-    - FusionResult: Trigger decisions (should_trigger=True/False)
-
-    The output type determines the module's role:
-    - Modules producing Observation are "analyzers"
-    - Modules producing FusionResult are "triggers"
+    For trigger modules, set signals["should_trigger"] = True in the
+    returned Observation. Helper properties on Observation make this easy:
+    - obs.should_trigger -> signals["should_trigger"]
+    - obs.trigger_score -> signals["trigger_score"]
+    - obs.trigger_reason -> signals["trigger_reason"]
+    - obs.trigger -> metadata["trigger"]
 
     Attributes:
         depends: List of module names this module depends on.
@@ -110,19 +121,19 @@ class Module(ABC):
         self,
         frame: "Frame",
         deps: DepsContext = None,
-    ) -> ModuleOutput:
+    ) -> Optional["Observation"]:
         """Process a frame and produce output.
 
         Args:
             frame: The current video frame to process.
-            deps: Dict of outputs from dependency modules.
+            deps: Dict of Observations from dependency modules.
                   Keys are module names from the `depends` list.
-                  Values are Observation or FusionResult from those modules.
 
         Returns:
-            - Observation: For analysis modules
-            - FusionResult: For trigger modules
-            - None: If no meaningful output can be produced
+            Observation with analysis results.
+            For trigger modules, set signals["should_trigger"] = True
+            and optionally include metadata["trigger"].
+            Return None if no meaningful output can be produced.
 
         Example:
             >>> def process(self, frame, deps=None):
@@ -166,6 +177,58 @@ class Module(ABC):
         """
         pass
 
+    def extract(
+        self,
+        frame: "Frame",
+        deps: DepsContext = None,
+    ) -> Optional["Observation"]:
+        """Alias for process() for backward compatibility.
+
+        This allows Module subclasses to work with code that calls extract().
+
+        Args:
+            frame: The current video frame to process.
+            deps: Dict of Observations from dependency modules.
+
+        Returns:
+            Same as process().
+        """
+        return self.process(frame, deps)
+
+    def update(
+        self,
+        observation: "Observation",
+    ) -> Optional["Observation"]:
+        """Legacy fusion API: process an observation and produce output.
+
+        This method provides backwards compatibility with the old fusion API
+        that used update(observation) instead of process(frame, deps).
+
+        Creates a mock frame from the observation and delegates to process().
+
+        Args:
+            observation: Observation from an upstream module.
+
+        Returns:
+            Observation with trigger decision.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class _MockFrame:
+            frame_id: int
+            t_src_ns: int
+            data: object = None
+
+        mock_frame = _MockFrame(
+            frame_id=observation.frame_id,
+            t_src_ns=observation.t_ns,
+            data=None,
+        )
+        # Pass observation in deps using source as key
+        deps = {observation.source: observation}
+        return self.process(mock_frame, deps)
+
     def __enter__(self) -> "Module":
         """Context manager entry - calls initialize()."""
         self.initialize()
@@ -175,113 +238,5 @@ class Module(ABC):
         """Context manager exit - calls cleanup()."""
         self.cleanup()
 
-    # Convenience properties for checking module type
 
-    @property
-    def is_trigger(self) -> bool:
-        """Check if this module produces triggers.
-
-        Default implementation returns False. Trigger modules
-        should override to return True, or this can be detected
-        at runtime by checking the output type.
-        """
-        return False
-
-
-# Backward compatibility aliases
-# These will be deprecated in future versions
-
-def _create_extractor_adapter():
-    """Create BaseExtractor as an alias for Module."""
-    import warnings
-
-    class BaseExtractor(Module):
-        """DEPRECATED: Use Module instead.
-
-        BaseExtractor is now an alias for Module.
-        Modules that return Observation are extractors.
-        """
-
-        def __init_subclass__(cls, **kwargs):
-            super().__init_subclass__(**kwargs)
-            warnings.warn(
-                "BaseExtractor is deprecated. Use Module instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-        # Alias extract -> process for backward compatibility
-        def process(self, frame, deps=None):
-            return self.extract(frame, deps)
-
-        @abstractmethod
-        def extract(self, frame, deps=None):
-            """DEPRECATED: Override process() instead."""
-            ...
-
-    return BaseExtractor
-
-
-def _create_fusion_adapter():
-    """Create adapter for BaseFusion to work as Module."""
-    import warnings
-
-    class FusionModule(Module):
-        """Adapter to use BaseFusion as a Module.
-
-        Wraps a BaseFusion instance to provide Module interface.
-        """
-
-        def __init__(self, fusion: "BaseFusion", name: str = "fusion"):
-            self._fusion = fusion
-            self._name = name
-
-        @property
-        def name(self) -> str:
-            return self._name
-
-        @property
-        def is_trigger(self) -> bool:
-            return True
-
-        def process(self, frame, deps=None):
-            # FusionModule needs observations from deps
-            # Typically depends on all upstream analyzers
-            if not deps:
-                from visualpath.core.fusion import FusionResult
-                return FusionResult(should_trigger=False)
-
-            # Process each observation through fusion
-            results = []
-            for obs in deps.values():
-                if hasattr(obs, 'source'):  # It's an Observation
-                    result = self._fusion.update(obs)
-                    if result.should_trigger:
-                        return result
-                    results.append(result)
-
-            # Return last result or non-trigger
-            if results:
-                return results[-1]
-            from visualpath.core.fusion import FusionResult
-            return FusionResult(should_trigger=False)
-
-        def reset(self) -> None:
-            self._fusion.reset()
-
-        @property
-        def is_gate_open(self) -> bool:
-            return self._fusion.is_gate_open
-
-        @property
-        def in_cooldown(self) -> bool:
-            return self._fusion.in_cooldown
-
-    return FusionModule
-
-
-# Export the adapter classes
-FusionModule = _create_fusion_adapter()
-
-
-__all__ = ["Module", "ModuleOutput", "DepsContext", "FusionModule"]
+__all__ = ["Module", "DepsContext"]

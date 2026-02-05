@@ -321,14 +321,14 @@ class ExecutionBackend(ABC):
 import visualpath as vp
 
 # 기본 백엔드 (SimpleBackend)
-triggers = vp.run("video.mp4", ["face"])
+result = vp.process_video("video.mp4", modules=[face_detector])
 
 # 백엔드 명시적 지정
-triggers = vp.run("video.mp4", ["face"], backend="simple")
+result = vp.process_video("video.mp4", modules=[face_detector], backend="simple")
 
 # Pathway 백엔드 사용
 # 설치: pip install visualpath[pathway]
-triggers = vp.run("video.mp4", ["face"], backend="pathway")
+result = vp.process_video("video.mp4", modules=[face_detector], backend="pathway")
 ```
 
 ### PathwayBackend 설정

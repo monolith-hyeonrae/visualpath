@@ -52,8 +52,9 @@ from visualbase.ipc.factory import TransportFactory
 from visualbase.ipc.messages import TRIGMessage
 from visualbase import Frame
 
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion, FusionResult
+from visualpath.core.extractor import Observation
+from visualpath.core.module import Module
+from visualpath.core.module import Module
 from visualpath.process.mapper import ObservationMapper, DefaultObservationMapper
 from visualpath.observability import ObservabilityHub
 
@@ -96,7 +97,7 @@ class ExtractorProcess:
 
     def __init__(
         self,
-        extractor: BaseExtractor,
+        extractor: Module,
         observation_mapper: Optional[ObservationMapper] = None,
         video_reader: Optional[VideoReader] = None,
         message_sender: Optional[MessageSender] = None,
@@ -251,8 +252,11 @@ class ExtractorProcess:
                     self._emit_frame_drop(dropped)
             self._last_frame_id = frame.frame_id
 
-            # Extract features
-            obs = self._extractor.extract(frame)
+            # Extract features (support both Module.process() and Module.extract())
+            if hasattr(self._extractor, 'process') and not hasattr(self._extractor, 'extract'):
+                obs = self._extractor.process(frame)
+            else:
+                obs = self._extractor.extract(frame)
             self._frames_processed += 1
 
             if obs is not None:
@@ -378,7 +382,7 @@ class FusionProcess:
 
     def __init__(
         self,
-        fusion: BaseFusion,
+        fusion: Module,
         observation_mapper: Optional[ObservationMapper] = None,
         obs_receiver: Optional[MessageReceiver] = None,
         trig_sender: Optional[MessageSender] = None,
@@ -386,7 +390,7 @@ class FusionProcess:
         trig_socket: Optional[str] = None,
         message_transport: str = "uds",
         alignment_window_ns: int = ALIGNMENT_WINDOW_NS,
-        on_trigger: Optional[Callable[[FusionResult], None]] = None,
+        on_trigger: Optional[Callable[[Observation], None]] = None,
         observability_hub: Optional[ObservabilityHub] = None,
     ):
         self._fusion = fusion
@@ -645,19 +649,27 @@ class FusionProcess:
             },
         ))
 
-    def _send_trigger(self, result: FusionResult) -> None:
-        """Send a TRIG message."""
-        if not result.trigger:
+    def _send_trigger(self, result: Observation) -> None:
+        """Send a TRIG message.
+
+        Args:
+            result: Observation with trigger info in signals/metadata.
+        """
+        trigger = result.trigger  # Uses property that checks metadata
+        if not trigger:
             return
 
-        trigger = result.trigger
+        # Get score and reason from Observation signals
+        score = result.trigger_score
+        reason = result.trigger_reason
+
         trig_msg = TRIGMessage(
             label=trigger.label or "HIGHLIGHT",
             t_start_ns=trigger.clip_start_ns,
             t_end_ns=trigger.clip_end_ns,
             faces=len(result.metadata.get("faces", [])),
-            score=result.score,
-            reason=result.reason,
+            score=score,
+            reason=reason,
         )
 
         if self._trig_client and self._trig_client.send(trig_msg.to_message()):

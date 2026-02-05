@@ -8,10 +8,9 @@ Example:
     >>> from visualpath.core import IsolationLevel, IsolationConfig
     >>>
     >>> # Plugin declares recommended isolation
-    >>> class HeavyMLExtractor(BaseExtractor):
-    ...     @property
-    ...     def recommended_isolation(self) -> IsolationLevel:
-    ...         return IsolationLevel.VENV
+    >>> class HeavyMLExtractor(Module):
+    ...     # Some ML modules may prefer VENV isolation
+    ...     pass
     >>>
     >>> # Config can override
     >>> config = IsolationConfig(

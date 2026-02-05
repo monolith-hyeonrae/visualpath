@@ -7,7 +7,7 @@ from typing import Optional
 from unittest import mock
 import time
 
-from visualpath.core import BaseExtractor, Observation, IsolationLevel
+from visualpath.core import Module, Observation, IsolationLevel
 from visualpath.process import (
     WorkerLauncher,
     InlineWorker,
@@ -31,8 +31,8 @@ class MockFrame:
     data: np.ndarray
 
 
-class SimpleExtractor(BaseExtractor):
-    """Simple extractor for testing."""
+class SimpleModule(Module):
+    """Simple module for testing."""
 
     def __init__(self, delay_ms: float = 0, fail: bool = False):
         self._delay_ms = delay_ms
@@ -45,7 +45,7 @@ class SimpleExtractor(BaseExtractor):
     def name(self) -> str:
         return "simple"
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         if self._delay_ms > 0:
             time.sleep(self._delay_ms / 1000)
 
@@ -102,26 +102,26 @@ class TestInlineWorker:
 
     def test_lifecycle(self):
         """Test worker start/stop lifecycle."""
-        extractor = SimpleExtractor()
-        worker = InlineWorker(extractor)
+        module = SimpleModule()
+        worker = InlineWorker(module)
 
         assert not worker.is_running
-        assert not extractor._initialized
+        assert not module._initialized
 
         worker.start()
 
         assert worker.is_running
-        assert extractor._initialized
+        assert module._initialized
 
         worker.stop()
 
         assert not worker.is_running
-        assert extractor._cleaned_up
+        assert module._cleaned_up
 
     def test_process_success(self):
         """Test successful frame processing."""
-        extractor = SimpleExtractor()
-        worker = InlineWorker(extractor)
+        module = SimpleModule()
+        worker = InlineWorker(module)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         worker.start()
@@ -135,8 +135,8 @@ class TestInlineWorker:
 
     def test_process_error(self):
         """Test frame processing with error."""
-        extractor = SimpleExtractor(fail=True)
-        worker = InlineWorker(extractor)
+        module = SimpleModule(fail=True)
+        worker = InlineWorker(module)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         worker.start()
@@ -149,8 +149,8 @@ class TestInlineWorker:
 
     def test_multiple_frames(self):
         """Test processing multiple frames."""
-        extractor = SimpleExtractor()
-        worker = InlineWorker(extractor)
+        module = SimpleModule()
+        worker = InlineWorker(module)
 
         worker.start()
 
@@ -173,26 +173,26 @@ class TestThreadWorker:
 
     def test_lifecycle(self):
         """Test worker start/stop lifecycle."""
-        extractor = SimpleExtractor()
-        worker = ThreadWorker(extractor)
+        module = SimpleModule()
+        worker = ThreadWorker(module)
 
         assert not worker.is_running
-        assert not extractor._initialized
+        assert not module._initialized
 
         worker.start()
 
         assert worker.is_running
-        assert extractor._initialized
+        assert module._initialized
 
         worker.stop()
 
         assert not worker.is_running
-        assert extractor._cleaned_up
+        assert module._cleaned_up
 
     def test_process_success(self):
         """Test successful frame processing."""
-        extractor = SimpleExtractor()
-        worker = ThreadWorker(extractor)
+        module = SimpleModule()
+        worker = ThreadWorker(module)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         worker.start()
@@ -205,8 +205,8 @@ class TestThreadWorker:
 
     def test_process_with_delay(self):
         """Test processing with delay (simulating work)."""
-        extractor = SimpleExtractor(delay_ms=50)
-        worker = ThreadWorker(extractor)
+        module = SimpleModule(delay_ms=50)
+        worker = ThreadWorker(module)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         worker.start()
@@ -218,8 +218,8 @@ class TestThreadWorker:
 
     def test_process_not_running(self):
         """Test processing when worker not running."""
-        extractor = SimpleExtractor()
-        worker = ThreadWorker(extractor)
+        module = SimpleModule()
+        worker = ThreadWorker(module)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         result = worker.process(frame)
@@ -230,8 +230,8 @@ class TestThreadWorker:
 
     def test_process_async(self):
         """Test async processing."""
-        extractor = SimpleExtractor(delay_ms=50)
-        worker = ThreadWorker(extractor)
+        module = SimpleModule(delay_ms=50)
+        worker = ThreadWorker(module)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         worker.start()
@@ -259,14 +259,14 @@ class TestProcessWorker:
 
     def test_lifecycle(self):
         """Test worker start/stop lifecycle."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
 
         # Mock ZMQ unavailable to force inline fallback
         with mock.patch(
             "visualpath.process.launcher._check_zmq_available",
             return_value=False,
         ):
-            worker = ProcessWorker(extractor)
+            worker = ProcessWorker(module)
 
             worker.start()
             assert worker.is_running
@@ -276,7 +276,7 @@ class TestProcessWorker:
 
     def test_process_success(self):
         """Test successful frame processing."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         # Mock ZMQ unavailable to force inline fallback
@@ -284,7 +284,7 @@ class TestProcessWorker:
             "visualpath.process.launcher._check_zmq_available",
             return_value=False,
         ):
-            worker = ProcessWorker(extractor)
+            worker = ProcessWorker(module)
 
             worker.start()
             result = worker.process(frame)
@@ -304,8 +304,8 @@ class TestVenvWorker:
 
     def test_lifecycle(self):
         """Test worker start/stop lifecycle."""
-        extractor = SimpleExtractor()
-        worker = VenvWorker(extractor, venv_path="/tmp/test-venv")
+        module = SimpleModule()
+        worker = VenvWorker(module, venv_path="/tmp/test-venv")
 
         worker.start()
         assert worker.is_running
@@ -315,8 +315,8 @@ class TestVenvWorker:
 
     def test_process_success(self):
         """Test successful frame processing."""
-        extractor = SimpleExtractor()
-        worker = VenvWorker(extractor, venv_path="/tmp/test-venv")
+        module = SimpleModule()
+        worker = VenvWorker(module, venv_path="/tmp/test-venv")
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
         worker.start()
@@ -336,31 +336,31 @@ class TestWorkerLauncher:
 
     def test_create_inline(self):
         """Test creating inline worker."""
-        extractor = SimpleExtractor()
-        worker = WorkerLauncher.create(IsolationLevel.INLINE, extractor)
+        module = SimpleModule()
+        worker = WorkerLauncher.create(IsolationLevel.INLINE, module)
 
         assert isinstance(worker, InlineWorker)
 
     def test_create_thread(self):
         """Test creating thread worker."""
-        extractor = SimpleExtractor()
-        worker = WorkerLauncher.create(IsolationLevel.THREAD, extractor)
+        module = SimpleModule()
+        worker = WorkerLauncher.create(IsolationLevel.THREAD, module)
 
         assert isinstance(worker, ThreadWorker)
 
     def test_create_process(self):
         """Test creating process worker."""
-        extractor = SimpleExtractor()
-        worker = WorkerLauncher.create(IsolationLevel.PROCESS, extractor)
+        module = SimpleModule()
+        worker = WorkerLauncher.create(IsolationLevel.PROCESS, module)
 
         assert isinstance(worker, ProcessWorker)
 
     def test_create_venv(self):
         """Test creating venv worker."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         worker = WorkerLauncher.create(
             IsolationLevel.VENV,
-            extractor,
+            module,
             venv_path="/tmp/test-venv",
         )
 
@@ -368,24 +368,24 @@ class TestWorkerLauncher:
 
     def test_create_venv_without_path_raises(self):
         """Test that creating venv worker without path raises."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
 
         with pytest.raises(ValueError, match="venv_path"):
-            WorkerLauncher.create(IsolationLevel.VENV, extractor)
+            WorkerLauncher.create(IsolationLevel.VENV, module)
 
     def test_create_container_not_implemented(self):
         """Test that container isolation is not implemented."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
 
         with pytest.raises(NotImplementedError):
-            WorkerLauncher.create(IsolationLevel.CONTAINER, extractor)
+            WorkerLauncher.create(IsolationLevel.CONTAINER, module)
 
     def test_worker_with_kwargs(self):
         """Test passing kwargs to worker."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         worker = WorkerLauncher.create(
             IsolationLevel.THREAD,
-            extractor,
+            module,
             queue_size=20,
         )
 

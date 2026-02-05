@@ -33,7 +33,8 @@ from concurrent.futures import ThreadPoolExecutor, Future, as_completed, Timeout
 
 from visualbase import Frame
 
-from visualpath.core.extractor import BaseExtractor, Observation
+from visualpath.core.extractor import Observation
+from visualpath.core.module import Module
 from visualpath.observability import ObservabilityHub
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class ExtractorOrchestrator:
 
     def __init__(
         self,
-        extractors: List[BaseExtractor],
+        extractors: List[Module],
         max_workers: Optional[int] = None,
         timeout: float = 5.0,
         observability_hub: Optional[ObservabilityHub] = None,
@@ -135,7 +136,7 @@ class ExtractorOrchestrator:
         timed_out_extractors: List[str] = []
 
         # Submit all extractors
-        futures: Dict[Future, BaseExtractor] = {}
+        futures: Dict[Future, Module] = {}
         for ext in self._extractors:
             future = self._executor.submit(self._safe_extract, ext, frame)
             futures[future] = ext
@@ -204,7 +205,7 @@ class ExtractorOrchestrator:
         ))
 
     def _safe_extract(
-        self, extractor: BaseExtractor, frame: Frame
+        self, extractor: Module, frame: Frame
     ) -> Optional[Observation]:
         """Safely run extraction with error handling.
 
@@ -216,7 +217,11 @@ class ExtractorOrchestrator:
             Observation or None on error.
         """
         try:
-            return extractor.extract(frame)
+            # Support both Module.process() and Module.extract()
+            if hasattr(extractor, 'process') and not hasattr(extractor, 'extract'):
+                return extractor.process(frame)
+            else:
+                return extractor.extract(frame)
         except Exception as e:
             logger.error(f"Extract error in {extractor.name}: {e}")
             self._errors += 1
@@ -241,7 +246,11 @@ class ExtractorOrchestrator:
 
         for ext in self._extractors:
             try:
-                obs = ext.extract(frame)
+                # Support both Module.process() and Module.extract()
+                if hasattr(ext, 'process') and not hasattr(ext, 'extract'):
+                    obs = ext.process(frame)
+                else:
+                    obs = ext.extract(frame)
                 if obs is not None:
                     observations.append(obs)
                     self._total_observations += 1

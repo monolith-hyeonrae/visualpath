@@ -35,7 +35,6 @@ from visualpath.flow.specs import NodeSpec
 if TYPE_CHECKING:
     from visualbase import Frame
     from visualpath.core.extractor import Observation
-    from visualpath.core.fusion import FusionResult
 
 
 @dataclass
@@ -44,12 +43,13 @@ class FlowData:
 
     FlowData carries all information needed for processing through the
     flow graph, including the original frame, extracted observations,
-    fusion results, and routing metadata.
+    and routing metadata.
 
     Attributes:
         frame: Optional source frame being processed.
         observations: List of observations from extractors.
-        results: List of fusion results.
+        results: List of trigger observations (Observations with should_trigger=True).
+            These are Observation instances with trigger info in signals/metadata.
         metadata: Arbitrary key-value metadata.
         path_id: Routing identifier for branching/joining.
         timestamp_ns: Timestamp in nanoseconds for synchronization.
@@ -57,7 +57,7 @@ class FlowData:
 
     frame: Optional["Frame"] = None
     observations: List["Observation"] = field(default_factory=list)
-    results: List["FusionResult"] = field(default_factory=list)
+    results: List["Observation"] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     path_id: str = "default"
     timestamp_ns: int = 0
@@ -102,11 +102,11 @@ class FlowData:
         """
         return self.clone(observations=observations)
 
-    def with_results(self, results: List["FusionResult"]) -> "FlowData":
+    def with_results(self, results: List["Observation"]) -> "FlowData":
         """Create a copy with new results.
 
         Args:
-            results: New results list.
+            results: New results list (Observations with trigger info).
 
         Returns:
             New FlowData with updated results.
@@ -126,11 +126,11 @@ class FlowData:
         new_observations.append(observation)
         return self.clone(observations=new_observations)
 
-    def add_result(self, result: "FusionResult") -> "FlowData":
+    def add_result(self, result: "Observation") -> "FlowData":
         """Create a copy with an additional result.
 
         Args:
-            result: FusionResult to add.
+            result: Observation (with trigger info) to add.
 
         Returns:
             New FlowData with the result appended.

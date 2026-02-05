@@ -14,6 +14,7 @@ from dataclasses import FrozenInstanceError
 from typing import List, Optional
 from unittest.mock import MagicMock
 
+from visualpath.core import Module, Observation
 from visualpath.flow.node import FlowNode, FlowData
 from visualpath.flow.specs import (
     NodeSpec,
@@ -51,8 +52,6 @@ from visualpath.flow.nodes import (
     CascadeFusionNode,
     CollectorNode,
 )
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion, FusionResult
 
 
 # =============================================================================
@@ -60,8 +59,8 @@ from visualpath.core.fusion import BaseFusion, FusionResult
 # =============================================================================
 
 
-class DummyExtractor(BaseExtractor):
-    """Minimal extractor for testing."""
+class DummyModule(Module):
+    """Minimal module for testing."""
 
     def __init__(self, name: str = "dummy", depends=None):
         self._name = name
@@ -75,7 +74,7 @@ class DummyExtractor(BaseExtractor):
     def depends(self):
         return self._depends
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         return Observation(source=self._name, frame_id=0, t_ns=0, signals={})
 
     def initialize(self) -> None:
@@ -85,22 +84,27 @@ class DummyExtractor(BaseExtractor):
         pass
 
 
-class DummyFusion(BaseFusion):
-    """Minimal fusion for testing."""
+class DummyTriggerModule(Module):
+    """Minimal trigger module for testing."""
 
-    def update(self, observation: Observation) -> FusionResult:
-        return FusionResult(should_trigger=False)
+    def __init__(self, depends_on: str = None):
+        self._depends_on = depends_on
+        self.depends = [depends_on] if depends_on else []
+
+    @property
+    def name(self) -> str:
+        return "dummy_trigger"
+
+    def process(self, frame, deps=None) -> Observation:
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         pass
-
-    @property
-    def is_gate_open(self) -> bool:
-        return True
-
-    @property
-    def in_cooldown(self) -> bool:
-        return False
 
 
 class CustomNode(FlowNode):
@@ -150,14 +154,14 @@ class TestPathNodeSpec:
     """Tests for PathNode.spec."""
 
     def test_returns_extract_spec(self):
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="analysis", extractors=[ext])
         spec = node.spec
         assert isinstance(spec, ExtractSpec)
 
     def test_spec_extractors(self):
-        ext1 = DummyExtractor("face")
-        ext2 = DummyExtractor("pose")
+        ext1 = DummyModule("face")
+        ext2 = DummyModule("pose")
         node = PathNode(name="analysis", extractors=[ext1, ext2])
         spec = node.spec
         assert len(spec.extractors) == 2
@@ -165,35 +169,35 @@ class TestPathNodeSpec:
         assert spec.extractors[1] is ext2
 
     def test_spec_fusion(self):
-        ext = DummyExtractor("face")
-        fusion = DummyFusion()
-        node = PathNode(name="analysis", extractors=[ext], fusion=fusion)
+        ext = DummyModule("face")
+        trigger = DummyTriggerModule()
+        node = PathNode(name="analysis", extractors=[ext], fusion=trigger)
         spec = node.spec
-        assert spec.fusion is fusion
+        assert spec.fusion is trigger
 
     def test_spec_run_fusion(self):
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="analysis", extractors=[ext], run_fusion=False)
         assert node.spec.run_fusion is False
 
     def test_spec_join_window_ns_default(self):
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="analysis", extractors=[ext])
         assert node.spec.join_window_ns == 100_000_000
 
     def test_spec_join_window_ns_custom(self):
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="analysis", extractors=[ext], join_window_ns=200_000_000)
         assert node.spec.join_window_ns == 200_000_000
 
     def test_spec_is_frozen(self):
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="analysis", extractors=[ext])
         with pytest.raises(FrozenInstanceError):
             node.spec.run_fusion = False
 
     def test_spec_extractors_are_tuple(self):
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="analysis", extractors=[ext])
         assert isinstance(node.spec.extractors, tuple)
 
@@ -539,9 +543,9 @@ class TestSplitByDependency:
         """All extractors are independent -> one group each."""
         from visualpath.backends.pathway.converter import FlowGraphConverter
 
-        ext1 = DummyExtractor("face")
-        ext2 = DummyExtractor("pose")
-        ext3 = DummyExtractor("scene")
+        ext1 = DummyModule("face")
+        ext2 = DummyModule("pose")
+        ext3 = DummyModule("scene")
 
         groups = FlowGraphConverter._split_by_dependency([ext1, ext2, ext3])
 
@@ -552,9 +556,9 @@ class TestSplitByDependency:
         """All extractors form a chain -> single group."""
         from visualpath.backends.pathway.converter import FlowGraphConverter
 
-        ext1 = DummyExtractor("face_detect")
-        ext2 = DummyExtractor("face_expression", depends=["face_detect"])
-        ext3 = DummyExtractor("face_emotion", depends=["face_expression"])
+        ext1 = DummyModule("face_detect")
+        ext2 = DummyModule("face_expression", depends=["face_detect"])
+        ext3 = DummyModule("face_emotion", depends=["face_expression"])
 
         groups = FlowGraphConverter._split_by_dependency([ext1, ext2, ext3])
 
@@ -565,9 +569,9 @@ class TestSplitByDependency:
         """Mix of dependent and independent extractors."""
         from visualpath.backends.pathway.converter import FlowGraphConverter
 
-        face = DummyExtractor("face_detect")
-        expression = DummyExtractor("face_expression", depends=["face_detect"])
-        pose = DummyExtractor("pose_detect")
+        face = DummyModule("face_detect")
+        expression = DummyModule("face_expression", depends=["face_detect"])
+        pose = DummyModule("pose_detect")
 
         groups = FlowGraphConverter._split_by_dependency([face, expression, pose])
 
@@ -581,7 +585,7 @@ class TestSplitByDependency:
         """Single extractor -> single group."""
         from visualpath.backends.pathway.converter import FlowGraphConverter
 
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         groups = FlowGraphConverter._split_by_dependency([ext])
 
         assert len(groups) == 1
@@ -591,8 +595,8 @@ class TestSplitByDependency:
         """Extractors within a group maintain insertion order."""
         from visualpath.backends.pathway.converter import FlowGraphConverter
 
-        ext1 = DummyExtractor("face_detect")
-        ext2 = DummyExtractor("face_expression", depends=["face_detect"])
+        ext1 = DummyModule("face_detect")
+        ext2 = DummyModule("face_expression", depends=["face_detect"])
 
         groups = FlowGraphConverter._split_by_dependency([ext1, ext2])
 
@@ -663,7 +667,7 @@ class TestSpecProcessConsistency:
 
     def test_path_node_spec_extractors_immutable(self):
         """PathNode spec.extractors is a tuple (immutable)."""
-        ext = DummyExtractor("face")
+        ext = DummyModule("face")
         node = PathNode(name="p", extractors=[ext])
         spec = node.spec
         assert isinstance(spec.extractors, tuple)

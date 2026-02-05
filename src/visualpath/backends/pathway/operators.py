@@ -15,7 +15,8 @@ from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from visualbase import Frame
-    from visualpath.core.extractor import BaseExtractor, Observation
+    from visualpath.core.extractor import Observation
+    from visualpath.core.module import Module
 
 try:
     import pathway as pw
@@ -41,7 +42,7 @@ class ExtractorResult:
 
 
 def create_extractor_udf(
-    extractor: "BaseExtractor",
+    extractor: "Module",
     deps: Optional[Dict[str, "Observation"]] = None,
 ):
     """Create a callable for a single extractor.
@@ -81,7 +82,7 @@ def create_extractor_udf(
     return extract_fn
 
 
-def create_multi_extractor_udf(extractors: List["BaseExtractor"]):
+def create_multi_extractor_udf(extractors: List["Module"]):
     """Create a callable that runs multiple extractors on each frame.
 
     Extractors are run in order with dependency resolution: each
@@ -131,7 +132,7 @@ def create_multi_extractor_udf(extractors: List["BaseExtractor"]):
 if PATHWAY_AVAILABLE:
     def apply_extractors(
         frames_table: "pw.Table",
-        extractors: List["BaseExtractor"],
+        extractors: List["Module"],
     ) -> "pw.Table":
         """Apply extractors to a Pathway frames table.
 

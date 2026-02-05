@@ -1,12 +1,13 @@
 # VisualPath - Claude Session Context
 
 > 최종 업데이트: 2026-02-05
-> 상태: **통합 Module API 완료**
+> 상태: **통합 Module API 완료, Deprecated 클래스 완전 제거**
 
 ## 프로젝트 역할
 
 **범용 영상 분석 프레임워크** (재사용 가능):
 - **통합 Module 인터페이스** (Extractor/Fusion 통합 완료)
+- **통합 Observation 출력** (모든 모듈은 Observation 반환)
 - **NodeSpec 기반 선언적 노드 정의** (ModuleSpec, ExtractSpec 등)
 - Worker 격리 실행 (venv, process, thread)
 - Plugin discovery (entry_points 기반)
@@ -32,11 +33,9 @@
 
 | 모듈 | 기능 | 설명 |
 |------|------|------|
-| `core.Module` | **통합 모듈 ABC** | Observation 또는 FusionResult 반환 |
-| `core.Observation` | 분석 결과 컨테이너 | Analyzer 모듈 출력 타입 |
-| `core.FusionResult` | 트리거 결과 컨테이너 | Trigger 모듈 출력 타입 |
-| `core.BaseExtractor` | 분석기 ABC (deprecated) | Module 사용 권장 |
-| `core.BaseFusion` | 결정기 ABC (deprecated) | Module 사용 권장 |
+| `core.Module` | **통합 모듈 ABC** | Observation 반환 (통합) |
+| `core.Observation` | **통합 결과 컨테이너** | 분석 + 트리거 결과 (signals에 trigger info) |
+| `core.DummyExtractor` | 테스트용 모듈 | 간단한 테스트용 |
 | `core.IsolationLevel` | 격리 수준 | INLINE, THREAD, PROCESS, VENV |
 | `flow.specs.*` | **NodeSpec 선언적 스펙** | ModuleSpec, ExtractSpec 등 |
 | `process.WorkerLauncher` | Worker 팩토리 | 격리 수준별 Worker 생성 |
@@ -53,8 +52,7 @@
 visualpath/
 ├── core/
 │   ├── module.py        # Module ABC (통합 인터페이스)
-│   ├── extractor.py     # BaseExtractor, Observation (deprecated)
-│   ├── fusion.py        # BaseFusion, FusionResult (deprecated)
+│   ├── extractor.py     # Observation, DummyExtractor
 │   ├── isolation.py     # IsolationLevel
 │   └── path.py          # Path utilities
 ├── flow/
@@ -97,11 +95,12 @@ visualpath/
 
 ## 사용 예시
 
-### 통합 Module API (권장)
+### Module API (권장)
 
 ```python
-from visualpath.core import Module, Observation, FusionResult
+from visualpath.core import Module, Observation
 from visualpath.flow import FlowGraphBuilder, GraphExecutor
+from visualbase import Trigger
 
 # Analyzer 모듈: Observation 반환
 class FaceDetector(Module):
@@ -120,7 +119,7 @@ class FaceDetector(Module):
             signals={"face_count": len(faces)},
         )
 
-# Trigger 모듈: FusionResult 반환
+# Trigger 모듈: Observation with trigger info in signals
 class SmileTrigger(Module):
     depends = ["face_detect"]  # face_detect 의존
 
@@ -128,15 +127,31 @@ class SmileTrigger(Module):
     def name(self) -> str:
         return "smile_trigger"
 
-    @property
-    def is_trigger(self) -> bool:
-        return True
-
-    def process(self, frame, deps=None) -> FusionResult:
+    def process(self, frame, deps=None) -> Observation:
         face_obs = deps.get("face_detect") if deps else None
         if not face_obs or face_obs.signals.get("face_count", 0) == 0:
-            return FusionResult(should_trigger=False)
-        return FusionResult(should_trigger=True, score=0.9)
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"should_trigger": False},
+            )
+        trigger = Trigger.point(
+            event_time_ns=frame.t_src_ns,
+            pre_sec=2.0, post_sec=2.0,
+            label="smile",
+        )
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={
+                "should_trigger": True,
+                "trigger_score": 0.9,
+                "trigger_reason": "smile_detected",
+            },
+            metadata={"trigger": trigger},
+        )
 
 # FlowGraph 빌드
 graph = (FlowGraphBuilder()
@@ -151,25 +166,14 @@ with GraphExecutor(graph) as executor:
         executor.process(frame)
 ```
 
-### Legacy API (하위 호환)
+### 간단한 API
 
 ```python
-from visualpath.core import BaseExtractor, Observation, BaseFusion
-from visualpath.process import WorkerLauncher
-from visualpath.core.isolation import IsolationLevel
+import visualpath as vp
 
-# 앱에서 Extractor 구현
-class MyExtractor(BaseExtractor):
-    def extract(self, frame) -> Observation:
-        ...
-
-# Worker로 격리 실행
-launcher = WorkerLauncher()
-worker = launcher.create(
-    extractor_cls=MyExtractor,
-    isolation=IsolationLevel.VENV,
-    venv_path="/opt/venv-my"
-)
+# 비디오 처리 (modules 필수)
+result = vp.process_video("video.mp4", modules=[face_detector, smile_trigger])
+print(f"Found {len(result.triggers)} triggers")
 ```
 
 ## 실행 백엔드
@@ -177,12 +181,12 @@ worker = launcher.create(
 ```python
 import visualpath as vp
 
-# 기본 Simple 백엔드 (순차 처리)
-triggers = vp.run("video.mp4", ["face"], backend="simple")
+# 기본 (SimpleBackend)
+result = vp.process_video("video.mp4", modules=[face_detector, smile_trigger])
 
 # Pathway 백엔드 (스트리밍)
 # pip install visualpath[pathway] 필요
-triggers = vp.run("video.mp4", ["face"], backend="pathway")
+result = vp.process_video("video.mp4", modules=[face_detector], backend="pathway")
 ```
 
 ### 백엔드 비교
@@ -192,50 +196,15 @@ triggers = vp.run("video.mp4", ["face"], backend="pathway")
 | **SimpleBackend** | 모듈식 컴포넌트, 순차/병렬 처리 | 로컬 비디오, 개발/디버깅, 배치 처리 |
 | **PathwayBackend** | 스트리밍, 백프레셔, 워터마크 | 실시간 처리, 복잡한 동기화 |
 
-### SimpleBackend 컴포넌트
-
-```python
-from visualpath.backends.simple import (
-    SimpleBackend,
-    # 스케줄러: 프레임 선택/드롭 전략
-    PassThroughScheduler,   # 모든 프레임 처리
-    KeyframeScheduler,      # N번째 프레임만 처리
-    AdaptiveRateScheduler,  # 목표 FPS 유지
-    # 실행기: Extractor 실행 전략
-    SequentialExecutor,     # 순차 실행
-    ThreadPoolExecutor,     # 병렬 실행
-    TimeoutExecutor,        # 타임아웃 있는 병렬 실행
-    # 동기화: Observation 정렬 전략
-    NoSyncSynchronizer,     # 즉시 전달
-    TimeWindowSync,         # 시간 윈도우 기반 그룹핑
-    BarrierSync,            # 모든 소스 대기
-)
-
-# 컴포넌트 조합
-backend = SimpleBackend(
-    scheduler=AdaptiveRateScheduler(target_fps=10),
-    executor=ThreadPoolExecutor(max_workers=4),
-    synchronizer=TimeWindowSync(window_ns=100_000_000),
-)
-
-# 또는 팩토리 함수 사용
-from visualpath.backends.simple import (
-    create_parallel_backend,
-    create_realtime_backend,
-    create_batch_backend,
-)
-backend = create_realtime_backend(target_fps=10)
-```
-
 ## on_trigger 콜백 (비즈니스 로직은 앱에서)
 
 ```python
 # visualpath는 Action을 모름 - 콜백만 제공
 def run_pipeline(source, on_trigger: Callable[[Trigger], None]):
     for frame in source:
-        trigger = fusion.update(observations)
-        if trigger:
-            on_trigger(trigger)  # 앱에서 처리
+        result = fusion.process(frame, deps)
+        if result.should_trigger:
+            on_trigger(result.metadata["trigger"])  # 앱에서 처리
 
 # 앱(facemoment)에서 Action 정의
 def handle_trigger(trigger):
@@ -276,102 +245,75 @@ pip install visualpath[pathway]
 
 ## 개발 철학 및 의사 결정 기록
 
-### NodeSpec 선언적 전환 (2026-02-04)
+### Deprecated 클래스 완전 제거 (2026-02-05)
 
-#### 문제 의식
+#### 제거된 항목
 
-FlowGraphConverter가 노드의 private 속성(`node._path`, `node._condition`,
-`node._every_nth` 등)에 직접 접근하여 Pathway 연산자를 생성하고 있었음.
-이는 노드 내부 구현과 백엔드 간 강결합을 만들고, 노드 구현 변경 시
-converter가 깨지는 구조적 문제.
+다음 클래스/파일들이 완전히 제거됨:
+- `core/fusion.py` 파일 전체 (FusionResult, BaseFusion)
+- `BaseExtractor` 클래스
+- `Module.is_trigger` 프로퍼티
+- `vp.run()` 함수
+- `vp.process_video()`의 `extractors`/`fusion` 파라미터
 
-#### 설계 원칙
+#### 마이그레이션
 
-1. **spec + process() 공존** — spec은 선언적 의미, process()는 실행 fallback.
-   기존 노드가 spec을 override하지 않아도 process()로 동작함.
-2. **Fusion 별도 노드 없음** — fusion은 ExtractSpec의 일부로 포함.
-   face_detection → face_expression 같은 의존성 체인과 본질적으로 같음.
-3. **Source 외부 주입** — FlowGraph는 소스에 대해 모름.
-4. **시간 의미론은 그래프에 속함** — JoinSpec에 window_ns, lateness_ns 포함.
-   백엔드 기본값은 spec에 값이 없을 때의 fallback.
-5. **불변 spec** — 모든 spec은 `frozen=True` dataclass.
-   컬렉션 필드는 `tuple` 사용 (hashable, immutable).
-
-#### 핵심 결정
-
-| 결정 | 근거 |
+| 이전 | 이후 |
 |------|------|
-| spec은 abstract가 아님 (기본 None) | 커스텀 노드가 spec 없이 process()만 구현해도 동작해야 함 |
-| `PathNode.parallel`은 기본 False | Path._parallel(ThreadPool용)과 Pathway 스트림 분기는 다른 개념. 명시적 opt-in 필요 |
-| Converter는 `isinstance(node.spec, SpecType)`으로 dispatch | isinstance(node, NodeClass) 대비: 노드 타입과 변환 로직이 분리됨 |
-| JoinSpec.window_ns가 converter 기본값보다 우선 | 시간 의미론은 그래프 설계자가 정의, 백엔드는 fallback만 제공 |
-| Pathway 병렬 분기는 의존성 그래프 분석 기반 | 독립 extractor만 별도 UDF로 분리, 의존성 체인은 하나의 UDF에 유지 |
+| `class MyExtractor(BaseExtractor)` | `class MyExtractor(Module)` |
+| `def extract(self, frame)` | `def process(self, frame, deps=None)` |
+| `class MyFusion(BaseFusion)` | `class MyFusion(Module)` with `depends=[...]` |
+| `def update(self, observation)` | `def process(self, frame, deps=None)` |
+| `return FusionResult(should_trigger=True, ...)` | `return Observation(signals={"should_trigger": True, ...})` |
+| `result.score` | `result.trigger_score` |
+| `result.reason` | `result.trigger_reason` |
+| `vp.run(...)` | `vp.process_video(...)` |
+| `process_video(extractors=[...], fusion=...)` | `process_video(modules=[...])` |
 
-#### 구현 범위
+### Trigger 컨벤션
 
-```
-신규: flow/specs.py (17개 frozen dataclass)
-신규: tests/test_flow_specs.py (64개 테스트)
-수정: flow/node.py — spec 프로퍼티 추가
-수정: flow/nodes/*.py (6개 파일) — 15개 노드에 spec 구현
-수정: backends/pathway/converter.py — spec 기반 dispatch + 의존성 분석
-수정: backends/pathway/backend.py — _find_fusion spec 기반
-수정: flow/__init__.py — spec export
+| 필드 | Observation 위치 |
+|------|------------------|
+| `should_trigger` | `signals["should_trigger"]` |
+| `score` | `signals["trigger_score"]` |
+| `reason` | `signals["trigger_reason"]` |
+| `trigger` | `metadata["trigger"]` |
+
+### Observation 헬퍼 프로퍼티
+
+```python
+@dataclass
+class Observation:
+    # ... 기존 필드 ...
+
+    @property
+    def should_trigger(self) -> bool:
+        return bool(self.signals.get("should_trigger", False))
+
+    @property
+    def trigger_score(self) -> float:
+        return float(self.signals.get("trigger_score", 0.0))
+
+    @property
+    def trigger_reason(self) -> str:
+        return str(self.signals.get("trigger_reason", ""))
+
+    @property
+    def trigger(self) -> Optional[Trigger]:
+        return self.metadata.get("trigger")
 ```
 
 ---
 
-### Module 통합 완료 (2026-02-05)
+### NodeSpec 선언적 전환 (2026-02-04)
 
-#### 구현 내용
+#### 설계 원칙
 
-`Module` ABC를 통해 Extractor와 Fusion을 통합하는 작업 완료:
-
-```python
-# 통합된 Module 인터페이스
-class Module(ABC):
-    depends: List[str] = []  # 의존성 선언
-
-    @property
-    @abstractmethod
-    def name(self) -> str: ...
-
-    @abstractmethod
-    def process(self, frame, deps=None) -> ModuleOutput:
-        # ModuleOutput = Union[Observation, FusionResult, None]
-        ...
-
-    @property
-    def is_trigger(self) -> bool:
-        return False  # True면 trigger 모듈
-
-    def initialize(self) -> None: pass
-    def cleanup(self) -> None: pass
-    def reset(self) -> None: pass
-```
-
-#### 모듈 역할 결정
-
-반환 타입으로 역할이 결정됨:
-- `Observation` 반환 → Analyzer 모듈 (분석)
-- `FusionResult` 반환 → Trigger 모듈 (결정)
-
-#### API 통합 현황
-
-| 컴포넌트 | 상태 | 설명 |
-|----------|------|------|
-| `core.Module` | ✅ 완료 | 통합 ABC |
-| `flow.ModuleSpec` | ✅ 완료 | 통합 스펙 |
-| `PathNode(modules=[...])` | ✅ 완료 | 통합 API |
-| `FlowGraphBuilder.path(modules=[...])` | ✅ 완료 | 통합 빌더 API |
-| `SimpleInterpreter` | ✅ 완료 | ModuleSpec 해석 |
-| Legacy API (extractors/fusion) | ✅ 유지 | 하위 호환 |
-
-#### 하위 호환성
-
-기존 `BaseExtractor`, `BaseFusion` API는 deprecated로 유지:
-- `PathNode(extractors=[...], fusion=...)` → `ExtractSpec` 반환
-- `PathNode(modules=[...])` → `ModuleSpec` 반환
+1. **spec + process() 공존** — spec은 선언적 의미, process()는 실행 fallback.
+2. **Fusion 별도 노드 없음** — fusion은 ExtractSpec의 일부로 포함.
+3. **Source 외부 주입** — FlowGraph는 소스에 대해 모름.
+4. **시간 의미론은 그래프에 속함** — JoinSpec에 window_ns, lateness_ns 포함.
+5. **불변 spec** — 모든 spec은 `frozen=True` dataclass.
 
 ---
 

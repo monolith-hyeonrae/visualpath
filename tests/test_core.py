@@ -6,10 +6,8 @@ from dataclasses import dataclass
 from typing import Optional, List
 
 from visualpath.core import (
-    BaseExtractor,
+    Module,
     Observation,
-    BaseFusion,
-    FusionResult,
     IsolationLevel,
     IsolationConfig,
 )
@@ -28,8 +26,8 @@ class MockFrame:
     data: np.ndarray
 
 
-class SimpleExtractor(BaseExtractor):
-    """Simple extractor for testing."""
+class SimpleModule(Module):
+    """Simple module for testing."""
 
     def __init__(self, extract_value: float = 0.5):
         self._extract_value = extract_value
@@ -40,7 +38,7 @@ class SimpleExtractor(BaseExtractor):
     def name(self) -> str:
         return "simple"
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
@@ -55,8 +53,8 @@ class SimpleExtractor(BaseExtractor):
         self._cleaned_up = True
 
 
-class HeavyExtractor(BaseExtractor):
-    """Extractor that recommends VENV isolation."""
+class HeavyModule(Module):
+    """Module that recommends VENV isolation."""
 
     @property
     def name(self) -> str:
@@ -66,7 +64,7 @@ class HeavyExtractor(BaseExtractor):
     def recommended_isolation(self) -> IsolationLevel:
         return IsolationLevel.VENV
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
@@ -74,35 +72,44 @@ class HeavyExtractor(BaseExtractor):
         )
 
 
-class SimpleFusion(BaseFusion):
-    """Simple fusion for testing."""
+class TriggerModule(Module):
+    """Trigger module for testing."""
+
+    depends = ["simple"]
 
     def __init__(self, threshold: float = 0.5):
         self._threshold = threshold
         self._gate_open = False
         self._cooldown = False
 
-    def update(self, observation: Observation) -> FusionResult:
-        value = observation.signals.get("value", 0)
+    @property
+    def name(self) -> str:
+        return "trigger"
+
+    def process(self, frame, deps=None) -> Observation:
+        obs = deps.get("simple") if deps else None
+        value = obs.signals.get("value", 0) if obs else 0
         if value > self._threshold and self._gate_open:
-            return FusionResult(
-                should_trigger=True,
-                score=value,
-                reason="threshold_exceeded",
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": value,
+                    "trigger_reason": "threshold_exceeded",
+                },
             )
-        return FusionResult(should_trigger=False)
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         self._gate_open = False
         self._cooldown = False
-
-    @property
-    def is_gate_open(self) -> bool:
-        return self._gate_open
-
-    @property
-    def in_cooldown(self) -> bool:
-        return self._cooldown
 
 
 # =============================================================================
@@ -159,112 +166,146 @@ class TestObservation:
         )
         assert obs.timing["detect_ms"] == 10.5
 
+    def test_observation_trigger_properties(self):
+        """Test observation trigger helper properties."""
+        obs = Observation(
+            source="trigger_module",
+            frame_id=1,
+            t_ns=1000000,
+            signals={
+                "should_trigger": True,
+                "trigger_score": 0.85,
+                "trigger_reason": "expression_spike",
+            },
+        )
+        assert obs.should_trigger is True
+        assert obs.trigger_score == 0.85
+        assert obs.trigger_reason == "expression_spike"
+
+    def test_observation_no_trigger(self):
+        """Test observation without trigger signals."""
+        obs = Observation(
+            source="test",
+            frame_id=1,
+            t_ns=1000000,
+        )
+        assert obs.should_trigger is False
+        assert obs.trigger_score == 0.0
+        assert obs.trigger_reason == ""
+
 
 # =============================================================================
-# BaseExtractor Tests
+# Module Tests
 # =============================================================================
 
 
-class TestBaseExtractor:
-    """Tests for BaseExtractor abstract base class."""
+class TestModule:
+    """Tests for Module abstract base class."""
 
-    def test_simple_extractor(self):
-        """Test simple extractor implementation."""
-        extractor = SimpleExtractor(extract_value=0.7)
+    def test_simple_module(self):
+        """Test simple module implementation."""
+        module = SimpleModule(extract_value=0.7)
         frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
-        obs = extractor.extract(frame)
+        obs = module.process(frame)
 
         assert obs is not None
         assert obs.source == "simple"
         assert obs.frame_id == 1
         assert obs.signals["value"] == 0.7
 
-    def test_extractor_lifecycle(self):
-        """Test extractor initialize/cleanup lifecycle."""
-        extractor = SimpleExtractor()
+    def test_module_lifecycle(self):
+        """Test module initialize/cleanup lifecycle."""
+        module = SimpleModule()
 
-        assert not extractor._initialized
-        assert not extractor._cleaned_up
+        assert not module._initialized
+        assert not module._cleaned_up
 
-        extractor.initialize()
-        assert extractor._initialized
+        module.initialize()
+        assert module._initialized
 
-        extractor.cleanup()
-        assert extractor._cleaned_up
+        module.cleanup()
+        assert module._cleaned_up
 
-    def test_extractor_context_manager(self):
-        """Test extractor as context manager."""
-        extractor = SimpleExtractor()
+    def test_module_context_manager(self):
+        """Test module as context manager."""
+        module = SimpleModule()
 
-        with extractor as e:
-            assert e._initialized
-            assert not e._cleaned_up
+        with module as m:
+            assert m._initialized
+            assert not m._cleaned_up
 
-        assert e._cleaned_up
+        assert m._cleaned_up
 
-    def test_default_recommended_isolation(self):
-        """Test default recommended isolation is INLINE."""
-        extractor = SimpleExtractor()
-        assert extractor.recommended_isolation == IsolationLevel.INLINE
+    def test_module_extract_alias(self):
+        """Test extract() is an alias for process()."""
+        module = SimpleModule(extract_value=0.5)
+        frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
-    def test_custom_recommended_isolation(self):
-        """Test custom recommended isolation."""
-        extractor = HeavyExtractor()
-        assert extractor.recommended_isolation == IsolationLevel.VENV
+        # extract() should work just like process()
+        obs = module.extract(frame)
+
+        assert obs is not None
+        assert obs.source == "simple"
+        assert obs.signals["value"] == 0.5
 
 
 # =============================================================================
-# BaseFusion Tests
+# Trigger Module Tests
 # =============================================================================
 
 
-class TestBaseFusion:
-    """Tests for BaseFusion abstract base class."""
+class TestTriggerModule:
+    """Tests for trigger module functionality."""
 
-    def test_simple_fusion_no_trigger(self):
-        """Test fusion with gate closed (no trigger)."""
-        fusion = SimpleFusion(threshold=0.5)
-        obs = Observation(
-            source="test",
-            frame_id=1,
-            t_ns=1000000,
-            signals={"value": 0.7},
-        )
+    def test_trigger_no_trigger(self):
+        """Test trigger module with gate closed (no trigger)."""
+        module = TriggerModule(threshold=0.5)
+        frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
+        deps = {
+            "simple": Observation(
+                source="simple",
+                frame_id=1,
+                t_ns=1000000,
+                signals={"value": 0.7},
+            )
+        }
 
-        result = fusion.update(obs)
+        result = module.process(frame, deps)
 
-        assert not result.should_trigger
-        assert result.trigger is None
+        assert result.should_trigger is False
 
-    def test_simple_fusion_trigger(self):
-        """Test fusion with gate open and threshold exceeded."""
-        fusion = SimpleFusion(threshold=0.5)
-        fusion._gate_open = True
+    def test_trigger_fires(self):
+        """Test trigger module with gate open and threshold exceeded."""
+        module = TriggerModule(threshold=0.5)
+        module._gate_open = True
+        frame = MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
 
-        obs = Observation(
-            source="test",
-            frame_id=1,
-            t_ns=1000000,
-            signals={"value": 0.7},
-        )
+        deps = {
+            "simple": Observation(
+                source="simple",
+                frame_id=1,
+                t_ns=1000000,
+                signals={"value": 0.7},
+            )
+        }
 
-        result = fusion.update(obs)
+        result = module.process(frame, deps)
 
-        assert result.should_trigger
-        assert result.score == 0.7
-        assert result.reason == "threshold_exceeded"
+        assert result.should_trigger is True
+        assert result.trigger_score == 0.7
+        assert result.trigger_reason == "threshold_exceeded"
 
-    def test_fusion_reset(self):
-        """Test fusion reset."""
-        fusion = SimpleFusion()
-        fusion._gate_open = True
-        fusion._cooldown = True
+    def test_trigger_reset(self):
+        """Test trigger module reset."""
+        module = TriggerModule()
+        module._gate_open = True
+        module._cooldown = True
 
-        fusion.reset()
+        module.reset()
 
-        assert not fusion.is_gate_open
-        assert not fusion.in_cooldown
+        assert not module._gate_open
+        assert not module._cooldown
 
 
 # =============================================================================
@@ -375,37 +416,3 @@ class TestIsolationConfig:
 
         assert config.get_container_image("face") == "myrepo/face:latest"
         assert config.get_container_image("unknown") is None
-
-
-# =============================================================================
-# FusionResult Tests
-# =============================================================================
-
-
-class TestFusionResult:
-    """Tests for FusionResult dataclass."""
-
-    def test_basic_result(self):
-        """Test basic fusion result."""
-        result = FusionResult(should_trigger=False)
-
-        assert not result.should_trigger
-        assert result.trigger is None
-        assert result.score == 0.0
-        assert result.reason == ""
-
-    def test_trigger_result(self):
-        """Test fusion result with trigger."""
-        result = FusionResult(
-            should_trigger=True,
-            score=0.85,
-            reason="expression_spike",
-            observations_used=3,
-            metadata={"face_id": 1},
-        )
-
-        assert result.should_trigger
-        assert result.score == 0.85
-        assert result.reason == "expression_spike"
-        assert result.observations_used == 3
-        assert result.metadata["face_id"] == 1

@@ -13,10 +13,8 @@ from dataclasses import dataclass
 from typing import Optional, List
 
 from visualpath.core import (
-    BaseExtractor,
+    Module,
     Observation,
-    BaseFusion,
-    FusionResult,
 )
 from visualpath.flow import (
     FlowData,
@@ -54,8 +52,8 @@ class MockFrame:
     data: np.ndarray
 
 
-class CountingExtractor(BaseExtractor):
-    """Extractor that counts calls for testing."""
+class CountingModule(Module):
+    """Module that counts calls for testing."""
 
     def __init__(self, name: str, return_value: float = 0.5):
         self._name = name
@@ -68,7 +66,7 @@ class CountingExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -84,37 +82,54 @@ class CountingExtractor(BaseExtractor):
         self._cleaned_up = True
 
 
-class ThresholdFusion(BaseFusion):
-    """Simple fusion for testing."""
+class ThresholdTriggerModule(Module):
+    """Trigger module for testing."""
 
-    def __init__(self, threshold: float = 0.5):
+    def __init__(self, threshold: float = 0.5, depends_on: str = None):
         self._threshold = threshold
         self._gate_open = True
         self._cooldown = False
         self._update_count = 0
+        self._depends_on = depends_on
+        self.depends = [depends_on] if depends_on else []
 
-    def update(self, observation: Observation) -> FusionResult:
+    @property
+    def name(self) -> str:
+        return "threshold_trigger"
+
+    def process(self, frame, deps=None) -> Observation:
         self._update_count += 1
-        value = observation.signals.get("value", 0)
+        obs = None
+        if deps:
+            if self._depends_on and self._depends_on in deps:
+                obs = deps[self._depends_on]
+            else:
+                for v in deps.values():
+                    if hasattr(v, 'signals'):
+                        obs = v
+                        break
+
+        value = obs.signals.get("value", 0) if obs else 0
         if value > self._threshold:
-            return FusionResult(
-                should_trigger=True,
-                score=value,
-                reason="threshold_exceeded",
-                observations_used=1,
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": value,
+                    "trigger_reason": "threshold_exceeded",
+                },
             )
-        return FusionResult(should_trigger=False)
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         self._update_count = 0
-
-    @property
-    def is_gate_open(self) -> bool:
-        return self._gate_open
-
-    @property
-    def in_cooldown(self) -> bool:
-        return self._cooldown
 
 
 def make_frame(frame_id: int = 1, t_ns: int = 1_000_000) -> MockFrame:
@@ -144,7 +159,7 @@ def make_flow_data(
 
 
 # =============================================================================
-# FlowData Tests (unchanged — FlowData is a plain dataclass)
+# FlowData Tests (unchanged - FlowData is a plain dataclass)
 # =============================================================================
 
 
@@ -202,7 +217,12 @@ class TestFlowData:
 
     def test_add_result(self):
         data = make_flow_data()
-        result = FusionResult(should_trigger=True, score=0.9)
+        result = Observation(
+            source="trigger",
+            frame_id=1,
+            t_ns=1000,
+            signals={"should_trigger": True, "trigger_score": 0.9},
+        )
         new_data = data.add_result(result)
         assert len(new_data.results) == 1
         assert len(data.results) == 0
@@ -326,7 +346,7 @@ class TestSignalThresholdFilter:
 
 
 # =============================================================================
-# SamplerNode Tests (via interpreter — state is in interpreter)
+# SamplerNode Tests (via interpreter - state is in interpreter)
 # =============================================================================
 
 
@@ -543,7 +563,7 @@ class TestMultiBranchNode:
 
 
 # =============================================================================
-# JoinNode Tests (via interpreter — buffers are in interpreter state)
+# JoinNode Tests (via interpreter - buffers are in interpreter state)
 # =============================================================================
 
 
@@ -615,14 +635,24 @@ class TestCascadeFusionNode:
     def test_applies_fusion_function(self):
         def add_score(data: FlowData) -> FlowData:
             new_meta = dict(data.metadata)
-            new_meta["total_score"] = sum(r.score for r in data.results)
+            new_meta["total_score"] = sum(r.trigger_score for r in data.results)
             return data.clone(metadata=new_meta)
 
         node = CascadeFusionNode("cascade", fusion_fn=add_score)
         interp = SimpleInterpreter()
 
-        result1 = FusionResult(should_trigger=False, score=0.3)
-        result2 = FusionResult(should_trigger=False, score=0.5)
+        result1 = Observation(
+            source="trigger1",
+            frame_id=1,
+            t_ns=1000,
+            signals={"should_trigger": False, "trigger_score": 0.3},
+        )
+        result2 = Observation(
+            source="trigger2",
+            frame_id=1,
+            t_ns=1000,
+            signals={"should_trigger": False, "trigger_score": 0.5},
+        )
         data = make_flow_data()
         data = data.clone(results=[result1, result2])
 
@@ -666,20 +696,20 @@ class TestPathNode:
     """Tests for PathNode via interpreter."""
 
     def test_with_existing_path(self):
-        ext = CountingExtractor("ext1", return_value=0.7)
+        ext = CountingModule("ext1", return_value=0.7)
         path = Path(name="test_path", extractors=[ext])
         node = PathNode(path=path)
         assert node.name == "test_path"
         assert node.path is path
 
     def test_with_components(self):
-        ext = CountingExtractor("ext1")
-        fusion = ThresholdFusion()
-        node = PathNode(name="my_path", extractors=[ext], fusion=fusion)
+        ext = CountingModule("ext1")
+        trigger = ThresholdTriggerModule()
+        node = PathNode(name="my_path", extractors=[ext], fusion=trigger)
         assert node.name == "my_path"
 
     def test_interpret_adds_observations(self):
-        ext = CountingExtractor("ext1", return_value=0.7)
+        ext = CountingModule("ext1", return_value=0.7)
         path = Path(name="test", extractors=[ext])
         node = PathNode(path=path, run_fusion=False)
         interp = SimpleInterpreter()
@@ -695,9 +725,9 @@ class TestPathNode:
         assert outputs[0].observations[0].source == "ext1"
 
     def test_interpret_runs_fusion(self):
-        ext = CountingExtractor("ext1", return_value=0.7)
-        fusion = ThresholdFusion(threshold=0.5)
-        path = Path(name="test", extractors=[ext], fusion=fusion)
+        ext = CountingModule("ext1", return_value=0.7)
+        trigger = ThresholdTriggerModule(threshold=0.5, depends_on="ext1")
+        path = Path(name="test", extractors=[ext], fusion=trigger)
         node = PathNode(path=path, run_fusion=True)
         interp = SimpleInterpreter()
 
@@ -712,7 +742,7 @@ class TestPathNode:
         assert outputs[0].results[0].should_trigger  # 0.7 > 0.5
 
     def test_updates_path_id(self):
-        ext = CountingExtractor("ext1")
+        ext = CountingModule("ext1")
         path = Path(name="human", extractors=[ext])
         node = PathNode(path=path, run_fusion=False)
         interp = SimpleInterpreter()

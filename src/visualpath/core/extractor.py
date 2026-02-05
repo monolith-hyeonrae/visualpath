@@ -1,47 +1,26 @@
-"""Base extractor interface for feature extraction.
+"""Observation dataclass and DummyExtractor for testing.
 
-Extractors are the fundamental building blocks of visualpath pipelines.
-Each extractor analyzes frames and produces Observations containing
-extracted features.
+Observations are timestamped feature extractions that flow from
+modules to downstream consumers.
 
 Example:
-    >>> from visualpath.core import BaseExtractor, Observation
+    >>> from visualpath.core import Observation
     >>> from visualbase import Frame
     >>>
-    >>> class MyExtractor(BaseExtractor):
-    ...     @property
-    ...     def name(self) -> str:
-    ...         return "my_extractor"
-    ...
-    ...     def extract(self, frame: Frame) -> Observation:
-    ...         # Analyze the frame
-    ...         features = self._analyze(frame.data)
-    ...         return Observation(
-    ...             source=self.name,
-    ...             frame_id=frame.frame_id,
-    ...             t_ns=frame.t_src_ns,
-    ...             data=features,
-    ...         )
-
-Dependency-based extraction:
-    >>> class ExpressionExtractor(BaseExtractor):
-    ...     depends = ["face_detect"]  # Requires face_detect to run first
-    ...
-    ...     def extract(self, frame: Frame, deps: Dict[str, Observation] = None):
-    ...         face_obs = deps.get("face_detect") if deps else None
-    ...         if not face_obs:
-    ...             return None
-    ...         faces = face_obs.data["faces"]
-    ...         # Analyze expressions using detected faces
-    ...         return Observation(...)
+    >>> obs = Observation(
+    ...     source="face_detect",
+    ...     frame_id=frame.frame_id,
+    ...     t_ns=frame.t_src_ns,
+    ...     signals={"face_count": 3},
+    ...     data={"faces": [...]},
+    ... )
 """
 
-import warnings
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional, List, TypeVar, Generic
+from typing import Dict, Any, Optional, TypeVar, Generic, TYPE_CHECKING
 
-from visualbase import Frame
+if TYPE_CHECKING:
+    from visualbase import Frame
 
 
 T = TypeVar("T")
@@ -49,165 +28,99 @@ T = TypeVar("T")
 
 @dataclass
 class Observation(Generic[T]):
-    """Observation output from an extractor.
+    """Observation output from a module.
 
     Observations are timestamped feature extractions that flow from
-    extractors to fusion modules.
+    modules to downstream consumers.
 
     The generic type parameter T allows domain-specific data structures
     to be attached to observations.
 
     Attributes:
-        source: Name of the extractor that produced this observation.
+        source: Name of the module that produced this observation.
         frame_id: Frame identifier from the source video.
         t_ns: Timestamp in nanoseconds (source timeline).
         signals: Dictionary of extracted signals/features (scalar values).
+            For trigger observations, may include:
+            - should_trigger: Whether a trigger should fire
+            - trigger_score: Confidence score [0, 1]
+            - trigger_reason: Primary reason for the trigger
         data: Optional domain-specific data (e.g., list of detected objects).
         metadata: Additional metadata about the observation.
+            For trigger observations, may include:
+            - trigger: Trigger object if should_trigger is True
         timing: Optional per-component timing information in milliseconds.
     """
 
     source: str
     frame_id: int
     t_ns: int
-    signals: Dict[str, float] = field(default_factory=dict)
+    signals: Dict[str, Any] = field(default_factory=dict)
     data: Optional[T] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     timing: Optional[Dict[str, float]] = None
 
-
-class BaseExtractor(ABC):
-    """Abstract base class for feature extractors.
-
-    .. deprecated::
-        Use :class:`visualpath.core.Module` instead.
-        BaseExtractor will be removed in a future version.
-
-    Extractors analyze frames and produce observations containing
-    extracted features. Multiple extractors can run in parallel,
-    each focusing on different aspects of the video.
-
-    Subclasses must implement:
-    - name: Unique identifier for the extractor
-    - extract: Process a frame and return an observation
-
-    Optional overrides:
-    - depends: List of extractor names this extractor depends on
-    - initialize: Load models or resources
-    - cleanup: Release resources
-    - recommended_isolation: Suggest isolation level for this extractor
-
-    Example:
-        >>> class ObjectDetector(BaseExtractor):
-        ...     @property
-        ...     def name(self) -> str:
-        ...         return "object"
-        ...
-        ...     def extract(self, frame: Frame) -> Optional[Observation]:
-        ...         objects = self._detect(frame.data)
-        ...         return Observation(
-        ...             source=self.name,
-        ...             frame_id=frame.frame_id,
-        ...             t_ns=frame.t_src_ns,
-        ...             data=objects,
-        ...             signals={"object_count": len(objects)},
-        ...         )
-
-    Dependency example:
-        >>> class ExpressionExtractor(BaseExtractor):
-        ...     depends = ["face_detect"]
-        ...
-        ...     def extract(self, frame, deps=None):
-        ...         face_obs = deps["face_detect"] if deps else None
-        ...         if not face_obs:
-        ...             return None
-        ...         # Use face_obs.data["faces"] for expression analysis
-    """
-
-    # Class attribute: list of extractor names this extractor depends on
-    depends: List[str] = []
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-        # Skip warning for internal classes (DummyExtractor, etc.)
-        if cls.__module__.startswith("visualpath."):
-            return
-        warnings.warn(
-            f"{cls.__name__}: BaseExtractor is deprecated. "
-            "Use visualpath.core.Module instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    # Trigger helper properties
 
     @property
-    @abstractmethod
-    def name(self) -> str:
-        """Unique name identifying this extractor."""
-        ...
-
-    @abstractmethod
-    def extract(
-        self,
-        frame: Frame,
-        deps: Optional[Dict[str, "Observation"]] = None,
-    ) -> Optional[Observation]:
-        """Extract features from a frame.
-
-        Args:
-            frame: Input frame to analyze.
-            deps: Optional dict of observations from dependent extractors.
-                  Keys are extractor names listed in `depends`.
+    def should_trigger(self) -> bool:
+        """Check if this observation indicates a trigger should fire.
 
         Returns:
-            Observation containing extracted features, or None if
-            no meaningful observation could be made.
+            True if signals["should_trigger"] is truthy.
         """
-        ...
+        return bool(self.signals.get("should_trigger", False))
 
     @property
-    def recommended_isolation(self) -> "IsolationLevel":
-        """Recommended isolation level for this extractor.
-
-        Override to suggest an appropriate isolation level based on
-        the extractor's resource requirements. This can be overridden
-        by configuration at runtime.
+    def trigger_score(self) -> float:
+        """Get the trigger confidence score.
 
         Returns:
-            Default IsolationLevel.INLINE.
+            Score from signals["trigger_score"], or 0.0 if not set.
         """
-        from visualpath.core.isolation import IsolationLevel
-        return IsolationLevel.INLINE
+        return float(self.signals.get("trigger_score", 0.0))
 
-    def initialize(self) -> None:
-        """Initialize extractor resources (models, etc.).
+    @property
+    def trigger_reason(self) -> str:
+        """Get the trigger reason.
 
-        Override this method to load models or initialize resources.
-        Called once before processing begins.
+        Returns:
+            Reason from signals["trigger_reason"], or empty string if not set.
         """
-        pass
+        return str(self.signals.get("trigger_reason", ""))
 
-    def cleanup(self) -> None:
-        """Clean up extractor resources.
+    @property
+    def trigger(self) -> Optional[Any]:
+        """Get the Trigger object if present.
 
-        Override this method to release resources.
-        Called when processing ends.
+        Returns:
+            Trigger from metadata["trigger"], or None if not set.
         """
-        pass
+        return self.metadata.get("trigger")
 
-    def __enter__(self) -> "BaseExtractor":
-        self.initialize()
-        return self
+    # Backwards-compatible aliases for FusionResult API
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.cleanup()
+    @property
+    def score(self) -> float:
+        """Alias for trigger_score (backwards compatibility)."""
+        return self.trigger_score
+
+    @property
+    def reason(self) -> str:
+        """Alias for trigger_reason (backwards compatibility)."""
+        return self.trigger_reason
 
 
-class DummyExtractor(BaseExtractor):
-    """Dummy extractor for testing.
+class DummyExtractor:
+    """Dummy extractor (Module) for testing.
 
     Always returns a simple observation with fixed signals.
     Useful for integration tests and subprocess verification.
+
+    Implements the Module interface.
     """
+
+    depends = []  # No dependencies
 
     def __init__(self, delay_ms: float = 0.0):
         """Initialize the dummy extractor.
@@ -222,12 +135,12 @@ class DummyExtractor(BaseExtractor):
     def name(self) -> str:
         return "dummy"
 
-    def extract(
+    def process(
         self,
-        frame: Frame,
+        frame: "Frame",
         deps: Optional[Dict[str, "Observation"]] = None,
     ) -> Optional[Observation]:
-        """Extract dummy observation from frame."""
+        """Process frame and return dummy observation."""
         import time
 
         if self._delay_ms > 0:
@@ -247,8 +160,30 @@ class DummyExtractor(BaseExtractor):
             metadata={"extractor": "dummy"},
         )
 
+    # Alias for backward compatibility
+    def extract(
+        self,
+        frame: "Frame",
+        deps: Optional[Dict[str, "Observation"]] = None,
+    ) -> Optional[Observation]:
+        """Alias for process() for backward compatibility."""
+        return self.process(frame, deps)
 
-# Import for type checking only
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from visualpath.core.isolation import IsolationLevel
+    def initialize(self) -> None:
+        """Initialize resources (no-op for dummy)."""
+        pass
+
+    def cleanup(self) -> None:
+        """Clean up resources (no-op for dummy)."""
+        pass
+
+    def reset(self) -> None:
+        """Reset state."""
+        self._extract_count = 0
+
+    def __enter__(self) -> "DummyExtractor":
+        self.initialize()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.cleanup()

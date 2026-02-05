@@ -53,8 +53,7 @@ from visualpath.flow.specs import (
 )
 
 if TYPE_CHECKING:
-    from visualpath.core.extractor import BaseExtractor, Observation
-    from visualpath.core.fusion import BaseFusion
+    from visualpath.core.extractor import Observation
 
 
 # Comparison operators for signal filters
@@ -288,13 +287,13 @@ class SimpleInterpreter:
     def _interpret_modules(
         self, node: FlowNode, spec: ModuleSpec, data: FlowData
     ) -> List[FlowData]:
-        """Run modules on the frame (unified extractor/fusion).
+        """Run modules on the frame.
 
         Modules are processed in order. Each module can depend on
-        previous modules' outputs. Outputs are automatically routed
-        to the appropriate list (observations or results).
+        previous modules' outputs. Observations with should_trigger=True
+        are added to results.
         """
-        from visualpath.core.fusion import FusionResult
+        from visualpath.core.extractor import Observation
 
         frame = data.frame
         if frame is None:
@@ -306,11 +305,11 @@ class SimpleInterpreter:
         }
         # Also include existing results by source if available
         for result in data.results:
-            if hasattr(result, 'reason') and result.reason:
-                deps[result.reason] = result
+            if hasattr(result, 'source') and result.source:
+                deps[result.source] = result
 
         observations: List["Observation"] = []
-        results: List[FusionResult] = []
+        results: List["Observation"] = []
 
         for module in spec.modules:
             # Collect dependencies for this module
@@ -326,15 +325,13 @@ class SimpleInterpreter:
             output = self._call_module(module, frame, module_deps)
 
             if output is not None:
-                # Route output based on type
-                if isinstance(output, FusionResult):
+                # Route output based on should_trigger property
+                observations.append(output)
+                deps[module.name] = output
+
+                # If this is a trigger observation, also add to results
+                if output.should_trigger:
                     results.append(output)
-                    # Store by module name for downstream deps
-                    deps[module.name] = output
-                else:
-                    # Assume Observation
-                    observations.append(output)
-                    deps[module.name] = output
 
         # Update FlowData
         result = data.clone(
@@ -398,6 +395,8 @@ class SimpleInterpreter:
 
         DEPRECATED: Use ModuleSpec with _interpret_modules instead.
         """
+        from visualpath.core.extractor import Observation
+
         frame = data.frame
         if frame is None:
             return [data]
@@ -440,9 +439,7 @@ class SimpleInterpreter:
 
         # Optionally run fusion/trigger module
         if spec.run_fusion and spec.fusion is not None:
-            from visualpath.core.fusion import FusionResult
-
-            results: List[FusionResult] = []
+            results: List["Observation"] = []
             fusion = spec.fusion
 
             for obs in observations:
@@ -457,7 +454,9 @@ class SimpleInterpreter:
                     continue
 
                 if fusion_result is not None:
-                    results.append(fusion_result)
+                    # Only add to results if it's a trigger
+                    if fusion_result.should_trigger:
+                        results.append(fusion_result)
 
             result = result.clone(
                 results=list(result.results) + results,
@@ -467,7 +466,7 @@ class SimpleInterpreter:
 
     def _call_extract(
         self,
-        extractor: "BaseExtractor",
+        extractor: Any,
         frame: Any,
         deps: Optional[Dict[str, "Observation"]],
     ) -> Optional["Observation"]:

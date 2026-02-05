@@ -7,10 +7,9 @@ This package provides a Pathway-based execution backend that enables:
 - Interval joins for multi-path synchronization
 
 Example:
-    >>> from visualpath.backends.pathway import PathwayBackend
+    >>> import visualpath as vp
     >>>
-    >>> backend = PathwayBackend()
-    >>> triggers = backend.run(frames, extractors=[face_ext])
+    >>> result = vp.process_video("video.mp4", modules=[face_detector], backend="pathway")
 
 Requirements:
     Install with: pip install visualpath[pathway]

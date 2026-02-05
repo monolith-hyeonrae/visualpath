@@ -1,8 +1,8 @@
 """Pipeline runner for visualpath.
 
-This module provides the ``process()`` and ``run()`` entry points for
-running video analysis pipelines. It handles:
-- Extractor/fusion resolution from registry
+This module provides the ``process_video()`` entry point for running video
+analysis pipelines. It handles:
+- Module resolution from registry
 - Video source opening (visualbase or OpenCV fallback)
 - Backend selection and FlowGraph construction
 - Pipeline execution via ``backend.execute(frames, graph)``
@@ -10,8 +10,8 @@ running video analysis pipelines. It handles:
 Example:
     >>> import visualpath as vp
     >>>
-    >>> result = vp.process_video("video.mp4", extractors=["face"])
-    >>> triggers = vp.run("video.mp4", ["face"], backend="pathway")
+    >>> result = vp.process_video("video.mp4", modules=[face_detector, smile_trigger])
+    >>> print(f"Found {len(result.triggers)} triggers")
 """
 
 from dataclasses import dataclass, field
@@ -28,8 +28,8 @@ from typing import (
 
 from visualbase import Frame, Trigger
 
-from visualpath.core.extractor import BaseExtractor, Observation
-from visualpath.core.fusion import BaseFusion
+from visualpath.core.extractor import Observation
+from visualpath.core.module import Module
 
 # Backend type alias
 BackendType = Literal["simple", "pathway"]
@@ -74,59 +74,37 @@ def _get_backend(backend: BackendType) -> "ExecutionBackend":
         raise ValueError(f"Unknown backend: {backend}. Use 'simple' or 'pathway'.")
 
 
-def _resolve_extractors(
-    extractors: Sequence[Union[str, BaseExtractor]],
-) -> List[BaseExtractor]:
-    """Resolve extractor names or instances to instances.
+def _resolve_modules(
+    modules: Sequence[Union[str, Module]],
+) -> List[Module]:
+    """Resolve module names or instances to instances.
+
+    Modules can be either extractor names (from registry) or Module instances.
 
     Args:
-        extractors: List of extractor names or instances.
+        modules: List of module names or instances.
 
     Returns:
-        List of BaseExtractor instances.
+        List of Module instances.
 
     Raises:
-        ValueError: If an extractor name is not found.
+        ValueError: If a module name is not found.
     """
-    from visualpath.api import get_extractor
+    from visualpath.api import get_extractor, get_fusion
 
-    instances: List[BaseExtractor] = []
-    for ext in extractors:
-        if isinstance(ext, str):
-            instance = get_extractor(ext)
+    instances: List[Module] = []
+    for mod in modules:
+        if isinstance(mod, str):
+            # Try extractor registry first, then fusion registry
+            instance = get_extractor(mod)
             if instance is None:
-                raise ValueError(f"Unknown extractor: {ext}")
+                instance = get_fusion(mod)
+            if instance is None:
+                raise ValueError(f"Unknown module: {mod}")
             instances.append(instance)
         else:
-            instances.append(ext)
+            instances.append(mod)
     return instances
-
-
-def _resolve_fusion(
-    fusion: Optional[Union[str, BaseFusion]],
-) -> Optional[BaseFusion]:
-    """Resolve a fusion name or instance to an instance.
-
-    Args:
-        fusion: Fusion name, instance, or None.
-
-    Returns:
-        BaseFusion instance or None.
-
-    Raises:
-        ValueError: If a fusion name is not found.
-    """
-    if fusion is None:
-        return None
-
-    if isinstance(fusion, str):
-        from visualpath.api import get_fusion
-        instance = get_fusion(fusion)
-        if instance is None:
-            raise ValueError(f"Unknown fusion: {fusion}")
-        return instance
-
-    return fusion
 
 
 def _open_video_source(video: Union[str, Path], fps: int):
@@ -200,23 +178,21 @@ from visualpath.api import DEFAULT_FPS
 
 def process_video(
     video: Union[str, Path],
-    extractors: Sequence[Union[str, BaseExtractor]],
-    fusion: Optional[Union[str, BaseFusion]] = None,
+    modules: Sequence[Union[str, Module]],
     *,
     fps: int = DEFAULT_FPS,
     backend: BackendType = "simple",
     on_trigger: Optional[Callable[[Trigger], None]] = None,
 ) -> ProcessResult:
-    """Process a video with the specified extractors and fusion.
+    """Process a video with the specified modules.
 
     This is the main entry point for video processing. It constructs
-    a FlowGraph from the extractors/fusion, opens the video source,
-    and runs the pipeline through the selected backend.
+    a FlowGraph from the modules, opens the video source, and runs
+    the pipeline through the selected backend.
 
     Args:
         video: Path to video file.
-        extractors: List of extractor names or instances.
-        fusion: Fusion name, instance, or None.
+        modules: List of module names or instances.
         fps: Frames per second to process.
         backend: Execution backend ("simple" or "pathway").
         on_trigger: Callback when a trigger fires.
@@ -225,22 +201,22 @@ def process_video(
         ProcessResult with triggers and statistics.
 
     Example:
-        >>> result = vp.process_video("video.mp4", extractors=["face"])
-        >>> print(f"Found {len(result.triggers)} highlights")
+        >>> result = vp.process_video("video.mp4", modules=[face_detector, smile_trigger])
     """
     from visualpath.flow.graph import FlowGraph
 
-    ext_instances = _resolve_extractors(extractors)
-    fusion_instance = _resolve_fusion(fusion)
+    module_instances = _resolve_modules(modules)
+    graph = FlowGraph.from_modules(module_instances)
 
-    # Build FlowGraph
+    # Build trigger callback
     def _trigger_callback(data) -> None:
         for result in data.results:
+            # result is now an Observation with trigger info
+            # Use the should_trigger property and trigger from metadata
             if result.should_trigger and result.trigger:
                 if on_trigger:
                     on_trigger(result.trigger)
 
-    graph = FlowGraph.from_pipeline(ext_instances, fusion_instance)
     if on_trigger:
         graph.on_trigger(_trigger_callback)
 
@@ -266,36 +242,8 @@ def process_video(
     )
 
 
-def run(
-    video: Union[str, Path],
-    extractors: Sequence[Union[str, BaseExtractor]],
-    fusion: Optional[Union[str, BaseFusion]] = None,
-    *,
-    fps: int = DEFAULT_FPS,
-    backend: BackendType = "simple",
-    on_trigger: Optional[Callable[[Trigger], None]] = None,
-) -> List[Trigger]:
-    """Run a video analysis pipeline (simplified version of process).
-
-    Args:
-        video: Path to video file.
-        extractors: List of extractor names or instances.
-        fusion: Fusion name, instance, or None.
-        fps: Frames per second to process.
-        backend: Execution backend ("simple" or "pathway").
-        on_trigger: Callback when a trigger fires.
-
-    Returns:
-        List of triggers found.
-
-    Example:
-        >>> triggers = vp.run("video.mp4", ["face", "pose"])
-    """
-    result = process_video(
-        video, extractors, fusion,
-        fps=fps, backend=backend, on_trigger=on_trigger,
-    )
-    return result.triggers
+# Alias for simpler API
+run = process_video
 
 
 __all__ = [

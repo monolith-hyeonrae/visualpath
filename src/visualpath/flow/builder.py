@@ -17,8 +17,6 @@ from visualpath.flow.nodes.branch import BranchNode, FanOutNode, MultiBranchNode
 from visualpath.flow.nodes.join import JoinNode, CascadeFusionNode, CollectorNode
 
 if TYPE_CHECKING:
-    from visualpath.core.extractor import BaseExtractor
-    from visualpath.core.fusion import BaseFusion
     from visualpath.core.path import Path
     from visualpath.core.module import Module
 
@@ -62,8 +60,8 @@ class FlowGraphBuilder:
         # For name-based resolution
         self._modules: Dict[str, "Module"] = {}
         # Legacy resolution
-        self._extractors: Dict[str, "BaseExtractor"] = {}
-        self._fusions: Dict[str, "BaseFusion"] = {}
+        self._extractors: Dict[str, "Module"] = {}
+        self._fusions: Dict[str, "Module"] = {}
 
     def register_module(self, name: str, module: "Module") -> "FlowGraphBuilder":
         """Register a module for later reference by name.
@@ -78,7 +76,7 @@ class FlowGraphBuilder:
         self._modules[name] = module
         return self
 
-    def register_extractor(self, name: str, extractor: "BaseExtractor") -> "FlowGraphBuilder":
+    def register_extractor(self, name: str, extractor: "Module") -> "FlowGraphBuilder":
         """Register an extractor for later reference by name.
 
         .. deprecated::
@@ -99,7 +97,7 @@ class FlowGraphBuilder:
         self._extractors[name] = extractor
         return self
 
-    def register_fusion(self, name: str, fusion: "BaseFusion") -> "FlowGraphBuilder":
+    def register_fusion(self, name: str, fusion: "Module") -> "FlowGraphBuilder":
         """Register a fusion module for later reference by name.
 
         .. deprecated::
@@ -353,8 +351,8 @@ class FlowGraphBuilder:
         self,
         name: str,
         modules: Optional[List["Module"]] = None,
-        extractors: Optional[List["BaseExtractor"]] = None,
-        fusion: Optional["BaseFusion"] = None,
+        extractors: Optional[List["Module"]] = None,
+        fusion: Optional["Module"] = None,
         path: Optional["Path"] = None,
         run_fusion: bool = True,
         parallel: bool = False,

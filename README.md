@@ -8,7 +8,8 @@
 import visualpath as vp
 
 # 비디오 처리 (one-liner)
-triggers = vp.run("video.mp4", extractors=["face", "pose"])
+result = vp.process_video("video.mp4", modules=[face_detector, smile_trigger])
+print(f"Found {len(result.triggers)} triggers")
 ```
 
 ### Custom Extractor (3줄)
@@ -31,15 +32,16 @@ def smile_detector(face):
 ### 실행
 
 ```python
-# 간단히
-triggers = vp.run("video.mp4", extractors=["brightness"])
+# 기본
+result = vp.process_video("video.mp4", modules=[check_brightness])
+print(f"Found {len(result.triggers)} triggers")
 
 # 콜백과 함께
-vp.run("video.mp4", ["face"], fusion=smile_detector,
+result = vp.process_video("video.mp4", modules=[check_brightness, smile_detector],
        on_trigger=lambda t: print(f"Trigger: {t.label}"))
 
 # 상세 결과
-result = vp.process("video.mp4", ["face", "pose"])
+result = vp.process_video("video.mp4", modules=[face_detector, pose_detector])
 print(f"{len(result.triggers)} triggers in {result.frame_count} frames")
 ```
 
@@ -58,8 +60,7 @@ uv pip install -e .
 | `@vp.extractor(name)` | 함수를 extractor로 변환 |
 | `@vp.fusion(sources, cooldown)` | 함수를 fusion으로 변환 |
 | `vp.trigger(reason, score)` | 트리거 생성 |
-| `vp.run(video, extractors)` | 비디오 처리 (triggers 반환) |
-| `vp.process(video, extractors)` | 비디오 처리 (상세 결과) |
+| `vp.process_video(video, modules)` | 비디오 처리 (ProcessResult 반환) |
 | `vp.list_extractors()` | 사용 가능한 extractor 목록 |
 | `vp.list_fusions()` | 사용 가능한 fusion 목록 |
 | `vp.get_extractor(name)` | 이름으로 extractor 가져오기 |
@@ -230,11 +231,11 @@ pose_worker.start()
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  vp.run("video.mp4", extractors=["face", "pose"])           │
+│  vp.process_video("video.mp4", modules=[face_detector, smile_trigger])│
 │                                                             │
 │  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐   │
-│  │   Source    │ ──► │  Extractor  │ ──► │   Fusion    │   │
-│  │  (frames)   │     │ (parallel)  │     │ (triggers)  │   │
+│  │   Source    │ ──► │   Module    │ ──► │   Module    │   │
+│  │  (frames)   │     │ (analyzer)  │     │  (trigger)  │   │
 │  └─────────────┘     └─────────────┘     └─────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```

@@ -11,8 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKIN
 from visualpath.flow.node import FlowNode, FlowData
 
 if TYPE_CHECKING:
-    from visualpath.core.extractor import BaseExtractor
-    from visualpath.core.fusion import BaseFusion
+    from visualpath.core.module import Module
 
 
 @dataclass
@@ -317,10 +316,13 @@ class FlowGraph:
     def fire_triggers(self, data: FlowData) -> None:
         """Fire trigger callbacks for data with triggering results.
 
+        Results are Observation instances. Uses the should_trigger property
+        to check if the observation indicates a trigger should fire.
+
         Args:
             data: FlowData that reached a terminal node.
         """
-        # Check if any result should trigger
+        # Check if any result should trigger (using Observation.should_trigger property)
         should_fire = any(r.should_trigger for r in data.results)
         if should_fire:
             for callback in self._trigger_callbacks:
@@ -447,11 +449,13 @@ class FlowGraph:
     @classmethod
     def from_pipeline(
         cls,
-        extractors: List["BaseExtractor"],
-        fusion: Optional["BaseFusion"] = None,
+        extractors: List["Module"],
+        fusion: Optional["Module"] = None,
         on_trigger: Optional[Callable[[FlowData], None]] = None,
     ) -> "FlowGraph":
         """Create a FlowGraph from a simple pipeline specification.
+
+        DEPRECATED: Use from_modules() instead.
 
         Builds a linear graph: source → path(extractors, fusion).
 
@@ -473,6 +477,44 @@ class FlowGraph:
             extractors=extractors,
             fusion=fusion,
             run_fusion=fusion is not None,
+        ))
+        graph.add_edge("source", "pipeline")
+        if on_trigger:
+            graph.on_trigger(on_trigger)
+        return graph
+
+    @classmethod
+    def from_modules(
+        cls,
+        modules: List["Module"],
+        on_trigger: Optional[Callable[[FlowData], None]] = None,
+    ) -> "FlowGraph":
+        """Create a FlowGraph from a unified modules specification.
+
+        Builds a linear graph: source → path(modules).
+
+        This is the preferred API for creating simple pipelines. Modules
+        can be analyzers (return Observation) or triggers (return Observation
+        with should_trigger=True).
+
+        Args:
+            modules: List of modules to run (both analyzers and triggers).
+            on_trigger: Optional callback for trigger events.
+
+        Returns:
+            FlowGraph configured for the pipeline.
+
+        Example:
+            >>> graph = FlowGraph.from_modules([face_detector, smile_trigger])
+        """
+        from visualpath.flow.nodes.source import SourceNode
+        from visualpath.flow.nodes.path import PathNode
+
+        graph = cls(entry_node="source")
+        graph.add_node(SourceNode(name="source"))
+        graph.add_node(PathNode(
+            name="pipeline",
+            modules=modules,
         ))
         graph.add_edge("source", "pipeline")
         if on_trigger:

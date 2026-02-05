@@ -226,10 +226,19 @@ def run_worker(extractor_name: str, ipc_address: str) -> int:
                             if obs_data is not None:
                                 extractor_deps[name] = _deserialize_observation_in_worker(obs_data)
 
-                    try:
-                        observation = extractor.extract(frame, extractor_deps)
-                    except TypeError:
-                        observation = extractor.extract(frame)
+                    # Support both Module.process() and legacy.extract()
+                    if hasattr(extractor, 'process') and not hasattr(extractor, 'extract'):
+                        # New Module API
+                        try:
+                            observation = extractor.process(frame, extractor_deps)
+                        except TypeError:
+                            observation = extractor.process(frame)
+                    else:
+                        # Legacy legacy API
+                        try:
+                            observation = extractor.extract(frame, extractor_deps)
+                        except TypeError:
+                            observation = extractor.extract(frame)
 
                     socket.send_json({
                         "observation": _serialize_observation(observation),

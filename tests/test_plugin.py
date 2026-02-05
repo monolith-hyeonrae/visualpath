@@ -3,7 +3,7 @@
 import pytest
 from typing import Optional
 
-from visualpath.core import BaseExtractor, Observation
+from visualpath.core import Module, Observation
 from visualpath.plugin import (
     discover_extractors,
     discover_fusions,
@@ -17,7 +17,7 @@ from visualpath.plugin import (
 # =============================================================================
 
 
-class MockExtractor(BaseExtractor):
+class MockExtractor(Module):
     """Mock extractor for testing."""
 
     def __init__(self, value: float = 0.5):
@@ -28,7 +28,7 @@ class MockExtractor(BaseExtractor):
     def name(self) -> str:
         return "mock"
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         return Observation(
             source=self.name,
             frame_id=frame.frame_id,
@@ -43,14 +43,14 @@ class MockExtractor(BaseExtractor):
         self._initialized = False
 
 
-class MockExtractor2(BaseExtractor):
+class MockExtractor2(Module):
     """Another mock extractor for testing."""
 
     @property
     def name(self) -> str:
         return "mock2"
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         return None
 
 

@@ -68,6 +68,8 @@ class SimpleBackend(ExecutionBackend):
         # Register trigger collector on graph
         def collect_trigger(data):
             for result in data.results:
+                # result is now an Observation with trigger info
+                # Use the should_trigger property and trigger from metadata
                 if result.should_trigger and result.trigger:
                     triggers.append(result.trigger)
 

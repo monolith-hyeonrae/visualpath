@@ -4,14 +4,7 @@ This module provides the fundamental building blocks for video analysis pipeline
 
 Primary interface:
 - Module: Unified base class for all processing components
-
-Module outputs:
-- Observation: Analysis results (features, detections)
-- FusionResult: Trigger decisions
-
-Legacy interfaces (deprecated):
-- BaseExtractor: Use Module instead
-- BaseFusion: Use Module with FusionResult output instead
+- Observation: Analysis results and trigger decisions
 
 Other:
 - IsolationLevel: Enum for plugin isolation levels
@@ -19,23 +12,18 @@ Other:
 - PathOrchestrator: Orchestrates multiple Paths
 """
 
-from visualpath.core.module import Module, FusionModule
-from visualpath.core.extractor import BaseExtractor, Observation, DummyExtractor
-from visualpath.core.fusion import BaseFusion, FusionResult
+from visualpath.core.module import Module
+from visualpath.core.extractor import Observation, DummyExtractor
 from visualpath.core.isolation import IsolationLevel, IsolationConfig
 from visualpath.core.path import Path, PathConfig, PathOrchestrator
 
 __all__ = [
     # Primary interface
     "Module",
-    "FusionModule",
     # Data types
     "Observation",
-    "FusionResult",
-    # Legacy (deprecated)
-    "BaseExtractor",
+    # Testing
     "DummyExtractor",
-    "BaseFusion",
     # Isolation
     "IsolationLevel",
     "IsolationConfig",

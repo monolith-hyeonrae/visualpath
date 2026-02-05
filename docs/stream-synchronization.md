@@ -527,7 +527,7 @@ Pathway 스트리밍 엔진을 실행 백엔드로 통합하여 위에서 설명
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  vp.run("video.mp4", backend="pathway")                 │
+│  vp.process_video("video.mp4", backend="pathway")                 │
 └─────────────────────────────────────────────────────────┘
                           │
 ┌─────────────────────────┼─────────────────────────────┐
@@ -560,10 +560,10 @@ Pathway 스트리밍 엔진을 실행 백엔드로 통합하여 위에서 설명
 import visualpath as vp
 
 # Simple 백엔드 (기본값)
-triggers = vp.run("video.mp4", ["face"], backend="simple")
+result = vp.process_video("video.mp4", modules=[face_detector], backend="simple")
 
 # Pathway 백엔드 (스트리밍)
-triggers = vp.run("video.mp4", ["face"], backend="pathway")
+result = vp.process_video("video.mp4", modules=[face_detector], backend="pathway")
 ```
 
 ### PathwayBackend 설정

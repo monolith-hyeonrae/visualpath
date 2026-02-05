@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Optional, List
 from queue import Queue
 
-from visualpath.core import BaseExtractor, Observation, BaseFusion, FusionResult
+from visualpath.core import Module, Observation
 from visualpath.process import (
     ExtractorProcess,
     FusionProcess,
@@ -128,8 +128,8 @@ class MockMessageReceiver:
         return remaining[:max_messages]
 
 
-class SimpleExtractor(BaseExtractor):
-    """Simple extractor for testing."""
+class SimpleModule(Module):
+    """Simple module for testing."""
 
     def __init__(self, name: str = "simple", delay_ms: float = 0):
         self._name = name
@@ -140,7 +140,7 @@ class SimpleExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         if self._delay_ms > 0:
             time.sleep(self._delay_ms / 1000)
 
@@ -158,8 +158,10 @@ class SimpleExtractor(BaseExtractor):
         self._initialized = False
 
 
-class SimpleFusion(BaseFusion):
-    """Simple fusion for testing."""
+class TriggerModule(Module):
+    """Trigger module for testing."""
+
+    depends = ["simple"]
 
     def __init__(self, trigger_threshold: float = 0.5):
         self._threshold = trigger_threshold
@@ -167,33 +169,43 @@ class SimpleFusion(BaseFusion):
         self._in_cooldown = False
         self._observations: List[Observation] = []
 
-    def update(self, observation: Observation) -> FusionResult:
-        self._observations.append(observation)
-        score = observation.signals.get("value", 0)
+    @property
+    def name(self) -> str:
+        return "trigger"
+
+    def process(self, frame, deps=None) -> Observation:
+        obs = deps.get("simple") if deps else None
+        if obs:
+            self._observations.append(obs)
+        score = obs.signals.get("value", 0) if obs else 0
 
         if score > self._threshold and self._gate_open:
-            return FusionResult(
-                should_trigger=True,
-                trigger=Trigger(
-                    label="TEST",
-                    clip_start_ns=observation.t_ns - 1000000000,
-                    clip_end_ns=observation.t_ns,
-                ),
-                score=score,
-                reason="threshold_exceeded",
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": score,
+                    "trigger_reason": "threshold_exceeded",
+                },
+                data={
+                    "trigger": Trigger(
+                        label="TEST",
+                        clip_start_ns=frame.t_src_ns - 1000000000,
+                        clip_end_ns=frame.t_src_ns,
+                    )
+                },
             )
-        return FusionResult(should_trigger=False)
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         self._observations.clear()
-
-    @property
-    def is_gate_open(self) -> bool:
-        return self._gate_open
-
-    @property
-    def in_cooldown(self) -> bool:
-        return self._in_cooldown
 
 
 # =============================================================================
@@ -206,13 +218,13 @@ class TestExtractorProcess:
 
     def test_initialization_with_interfaces(self):
         """Test initialization with interface objects."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         reader = MockVideoReader([])
         sender = MockMessageSender()
         mapper = DefaultObservationMapper()
 
         process = ExtractorProcess(
-            extractor=extractor,
+            extractor=module,
             observation_mapper=mapper,
             video_reader=reader,
             message_sender=sender,
@@ -223,23 +235,23 @@ class TestExtractorProcess:
 
     def test_initialization_requires_reader_or_path(self):
         """Test that either video_reader or input_fifo is required."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         sender = MockMessageSender()
 
         with pytest.raises(ValueError, match="video_reader or input_fifo"):
             ExtractorProcess(
-                extractor=extractor,
+                extractor=module,
                 message_sender=sender,
             )
 
     def test_initialization_requires_sender_or_path(self):
         """Test that either message_sender or obs_socket is required."""
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         reader = MockVideoReader([])
 
         with pytest.raises(ValueError, match="message_sender or obs_socket"):
             ExtractorProcess(
-                extractor=extractor,
+                extractor=module,
                 video_reader=reader,
             )
 
@@ -249,13 +261,13 @@ class TestExtractorProcess:
             MockFrame(frame_id=i, t_src_ns=i * 1000000, data=np.zeros((100, 100, 3)))
             for i in range(5)
         ]
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         reader = MockVideoReader(frames)
         sender = MockMessageSender()
         mapper = DefaultObservationMapper()
 
         process = ExtractorProcess(
-            extractor=extractor,
+            extractor=module,
             observation_mapper=mapper,
             video_reader=reader,
             message_sender=sender,
@@ -284,7 +296,7 @@ class TestExtractorProcess:
         frames = [
             MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))
         ]
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         reader = MockVideoReader(frames)
         sender = MockMessageSender()
 
@@ -294,7 +306,7 @@ class TestExtractorProcess:
             callback_results.append((frame.frame_id, obs.source))
 
         process = ExtractorProcess(
-            extractor=extractor,
+            extractor=module,
             video_reader=reader,
             message_sender=sender,
             reconnect=False,
@@ -315,12 +327,12 @@ class TestExtractorProcess:
         """Test that stop() terminates the process."""
         # Create reader that never ends
         frames = [MockFrame(frame_id=i, t_src_ns=i * 1000000, data=np.zeros((100, 100, 3))) for i in range(1000)]
-        extractor = SimpleExtractor(delay_ms=100)  # Slow processing
+        module = SimpleModule(delay_ms=100)  # Slow processing
         reader = MockVideoReader(frames)
         sender = MockMessageSender()
 
         process = ExtractorProcess(
-            extractor=extractor,
+            extractor=module,
             video_reader=reader,
             message_sender=sender,
             reconnect=False,
@@ -338,12 +350,12 @@ class TestExtractorProcess:
     def test_uses_default_mapper_if_not_provided(self):
         """Test that DefaultObservationMapper is used if not provided."""
         frames = [MockFrame(frame_id=1, t_src_ns=1000000, data=np.zeros((100, 100, 3)))]
-        extractor = SimpleExtractor()
+        module = SimpleModule()
         reader = MockVideoReader(frames)
         sender = MockMessageSender()
 
         process = ExtractorProcess(
-            extractor=extractor,
+            extractor=module,
             video_reader=reader,
             message_sender=sender,
             reconnect=False,
@@ -371,13 +383,13 @@ class TestFusionProcess:
 
     def test_initialization_with_interfaces(self):
         """Test initialization with interface objects."""
-        fusion = SimpleFusion()
+        trigger_module = TriggerModule()
         receiver = MockMessageReceiver()
         sender = MockMessageSender()
         mapper = DefaultObservationMapper()
 
         process = FusionProcess(
-            fusion=fusion,
+            fusion=trigger_module,
             observation_mapper=mapper,
             obs_receiver=receiver,
             trig_sender=sender,
@@ -388,23 +400,23 @@ class TestFusionProcess:
 
     def test_initialization_requires_receiver_or_path(self):
         """Test that either obs_receiver or obs_socket is required."""
-        fusion = SimpleFusion()
+        trigger_module = TriggerModule()
         sender = MockMessageSender()
 
         with pytest.raises(ValueError, match="obs_receiver or obs_socket"):
             FusionProcess(
-                fusion=fusion,
+                fusion=trigger_module,
                 trig_sender=sender,
             )
 
     def test_initialization_requires_sender_or_path(self):
         """Test that either trig_sender or trig_socket is required."""
-        fusion = SimpleFusion()
+        trigger_module = TriggerModule()
         receiver = MockMessageReceiver()
 
         with pytest.raises(ValueError, match="trig_sender or trig_socket"):
             FusionProcess(
-                fusion=fusion,
+                fusion=trigger_module,
                 obs_receiver=receiver,
             )
 
@@ -420,13 +432,13 @@ class TestFusionProcess:
             }),
         ]
 
-        fusion = SimpleFusion(trigger_threshold=0.5)
+        trigger_module = TriggerModule(trigger_threshold=0.5)
         receiver = MockMessageReceiver(messages)
         sender = MockMessageSender()
         mapper = DefaultObservationMapper()
 
         process = FusionProcess(
-            fusion=fusion,
+            fusion=trigger_module,
             observation_mapper=mapper,
             obs_receiver=receiver,
             trig_sender=sender,
@@ -446,16 +458,16 @@ class TestFusionProcess:
         assert stats["obs_received"] == 1
         # Trigger may or may not be sent depending on timing
         # The observation should have been processed
-        assert len(fusion._observations) >= 0
+        assert len(trigger_module._observations) >= 0
 
     def test_stop_terminates_process(self):
         """Test that stop() terminates the process."""
-        fusion = SimpleFusion()
+        trigger_module = TriggerModule()
         receiver = MockMessageReceiver()
         sender = MockMessageSender()
 
         process = FusionProcess(
-            fusion=fusion,
+            fusion=trigger_module,
             obs_receiver=receiver,
             trig_sender=sender,
         )
@@ -476,7 +488,7 @@ class TestFusionProcess:
             "OBS src=test frame=1 t_ns=1000000",
         ]
 
-        fusion = SimpleFusion()
+        trigger_module = TriggerModule()
         receiver = MockMessageReceiver(messages)
         sender = MockMessageSender()
 
@@ -500,7 +512,7 @@ class TestFusionProcess:
                 )
 
         process = FusionProcess(
-            fusion=fusion,
+            fusion=trigger_module,
             observation_mapper=OBSMapper(),
             obs_receiver=receiver,
             trig_sender=sender,

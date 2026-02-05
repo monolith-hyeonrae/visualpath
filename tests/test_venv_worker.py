@@ -14,7 +14,7 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from visualpath.core import BaseExtractor, Observation, IsolationLevel
+from visualpath.core import Module, Observation, IsolationLevel
 from visualpath.process import (
     VenvWorker,
     ProcessWorker,
@@ -51,7 +51,7 @@ def create_test_frame(frame_id: int = 1, t_src_ns: int = 1000000) -> MockFrame:
     )
 
 
-class SimpleExtractor(BaseExtractor):
+class SimpleExtractor(Module):
     """Simple extractor for testing."""
 
     def __init__(self, delay_ms: float = 0, fail: bool = False):
@@ -65,7 +65,7 @@ class SimpleExtractor(BaseExtractor):
     def name(self) -> str:
         return "simple"
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         if self._delay_ms > 0:
             time.sleep(self._delay_ms / 1000)
 

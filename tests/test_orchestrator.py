@@ -6,7 +6,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List
 
-from visualpath.core import BaseExtractor, Observation
+from visualpath.core import Module, Observation
 from visualpath.process import ExtractorOrchestrator
 
 
@@ -23,7 +23,7 @@ class MockFrame:
     data: np.ndarray
 
 
-class SimpleExtractor(BaseExtractor):
+class SimpleExtractor(Module):
     """Simple extractor for testing."""
 
     def __init__(
@@ -45,7 +45,7 @@ class SimpleExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         if self._delay_ms > 0:
             time.sleep(self._delay_ms / 1000)
 

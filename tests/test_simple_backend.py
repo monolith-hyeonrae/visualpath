@@ -10,7 +10,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List
 
-from visualpath.core import BaseExtractor, Observation, BaseFusion, FusionResult
+from visualpath.core import Module, Observation
 from visualpath.backends.base import ExecutionBackend, PipelineResult
 
 
@@ -27,7 +27,7 @@ class MockFrame:
     data: np.ndarray
 
 
-class CountingExtractor(BaseExtractor):
+class CountingExtractor(Module):
     """Extractor that counts calls."""
 
     def __init__(self, name: str, value: float = 0.5):
@@ -41,7 +41,7 @@ class CountingExtractor(BaseExtractor):
     def name(self) -> str:
         return self._name
 
-    def extract(self, frame, deps=None) -> Optional[Observation]:
+    def process(self, frame, deps=None) -> Optional[Observation]:
         self._extract_count += 1
         return Observation(
             source=self.name,
@@ -57,15 +57,38 @@ class CountingExtractor(BaseExtractor):
         self._cleaned_up = True
 
 
-class ThresholdFusion(BaseFusion):
+class ThresholdFusion(Module):
     """Simple fusion for testing."""
+
+    depends = []
 
     def __init__(self, threshold: float = 0.5):
         self._threshold = threshold
         self._update_count = 0
 
-    def update(self, observation: Observation) -> FusionResult:
+    @property
+    def name(self) -> str:
+        return "threshold_fusion"
+
+    def process(self, frame, deps=None) -> Optional[Observation]:
+        """Process observations from deps and decide on trigger."""
         self._update_count += 1
+        # Find any observation from deps
+        observation = None
+        if deps:
+            for obs in deps.values():
+                if obs is not None:
+                    observation = obs
+                    break
+
+        if observation is None:
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={"should_trigger": False},
+            )
+
         value = observation.signals.get("value", 0)
         if value > self._threshold:
             from visualbase import Trigger
@@ -76,19 +99,25 @@ class ThresholdFusion(BaseFusion):
                 label="threshold",
                 score=value,
             )
-            return FusionResult(should_trigger=True, trigger=trigger, score=value)
-        return FusionResult(should_trigger=False)
+            return Observation(
+                source=self.name,
+                frame_id=frame.frame_id,
+                t_ns=frame.t_src_ns,
+                signals={
+                    "should_trigger": True,
+                    "trigger_score": value,
+                },
+                metadata={"trigger": trigger},
+            )
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"should_trigger": False},
+        )
 
     def reset(self) -> None:
         self._update_count = 0
-
-    @property
-    def is_gate_open(self) -> bool:
-        return True
-
-    @property
-    def in_cooldown(self) -> bool:
-        return False
 
 
 def make_frame(frame_id: int = 1, t_ns: int = 1_000_000) -> MockFrame:
