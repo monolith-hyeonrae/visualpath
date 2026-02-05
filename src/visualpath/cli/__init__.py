@@ -89,6 +89,46 @@ def create_parser() -> argparse.ArgumentParser:
         help="Show version information",
     )
 
+    # debug command
+    debug_parser = subparsers.add_parser(
+        "debug",
+        help="Run debug pipeline with mock frames",
+    )
+    debug_parser.add_argument(
+        "-n", "--frames",
+        type=int,
+        default=5,
+        help="Number of frames to process (default: 5)",
+    )
+    debug_parser.add_argument(
+        "-s", "--sample",
+        type=int,
+        default=1,
+        help="Sample every Nth frame (default: 1, no sampling)",
+    )
+    debug_parser.add_argument(
+        "-e", "--extractor",
+        type=str,
+        default="dummy",
+        help="Extractor name (default: dummy)",
+    )
+    debug_parser.add_argument(
+        "-f", "--fusion",
+        action="store_true",
+        help="Enable fusion (triggers)",
+    )
+    debug_parser.add_argument(
+        "-d", "--debug",
+        action="store_true",
+        help="Enable debug output (show internal operations)",
+    )
+    debug_parser.add_argument(
+        "-b", "--backend",
+        choices=["simple", "pathway"],
+        default="simple",
+        help="Backend to use (default: simple)",
+    )
+
     return parser
 
 
@@ -141,6 +181,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.command == "version":
         from visualpath.cli.commands.version import cmd_version
         return cmd_version()
+
+    elif args.command == "debug":
+        from visualpath.cli.commands.debug import cmd_debug
+        return cmd_debug(
+            frames=args.frames,
+            sample=args.sample,
+            extractor=args.extractor,
+            fusion=args.fusion,
+            debug=args.debug,
+            backend=args.backend,
+        )
 
     else:
         parser.print_help()
