@@ -1,13 +1,13 @@
 # VisualPath - Claude Session Context
 
-> 최종 업데이트: 2026-02-04
-> 상태: **NodeSpec 기반 선언적 전환 완료**
+> 최종 업데이트: 2026-02-05
+> 상태: **통합 Module API 완료**
 
 ## 프로젝트 역할
 
 **범용 영상 분석 프레임워크** (재사용 가능):
-- 분석 모듈 추상화 인터페이스 (Extractor/Fusion → 통합 예정)
-- **NodeSpec 기반 선언적 노드 정의** (spec + process() 공존)
+- **통합 Module 인터페이스** (Extractor/Fusion 통합 완료)
+- **NodeSpec 기반 선언적 노드 정의** (ModuleSpec, ExtractSpec 등)
 - Worker 격리 실행 (venv, process, thread)
 - Plugin discovery (entry_points 기반)
 - Observability (트레이싱, 로깅)
@@ -32,11 +32,13 @@
 
 | 모듈 | 기능 | 설명 |
 |------|------|------|
-| `core.BaseExtractor` | 분석기 ABC | Extractor 구현 인터페이스 |
-| `core.Observation` | 분석 결과 컨테이너 | Extractor 출력 타입 |
-| `core.BaseFusion` | 결정기 ABC | Trigger 판단 인터페이스 |
+| `core.Module` | **통합 모듈 ABC** | Observation 또는 FusionResult 반환 |
+| `core.Observation` | 분석 결과 컨테이너 | Analyzer 모듈 출력 타입 |
+| `core.FusionResult` | 트리거 결과 컨테이너 | Trigger 모듈 출력 타입 |
+| `core.BaseExtractor` | 분석기 ABC (deprecated) | Module 사용 권장 |
+| `core.BaseFusion` | 결정기 ABC (deprecated) | Module 사용 권장 |
 | `core.IsolationLevel` | 격리 수준 | INLINE, THREAD, PROCESS, VENV |
-| `flow.specs.*` | **NodeSpec 선언적 스펙** | 노드 의미를 구조화된 데이터로 노출 |
+| `flow.specs.*` | **NodeSpec 선언적 스펙** | ModuleSpec, ExtractSpec 등 |
 | `process.WorkerLauncher` | Worker 팩토리 | 격리 수준별 Worker 생성 |
 | `process.VenvWorker` | venv 격리 Worker | ML 의존성 충돌 해결 |
 | `plugin.discover_*` | 플러그인 검색 | entry_points 기반 |
@@ -50,19 +52,21 @@
 ```
 visualpath/
 ├── core/
-│   ├── extractor.py     # BaseExtractor, Observation
-│   ├── fusion.py        # BaseFusion, FusionResult
+│   ├── module.py        # Module ABC (통합 인터페이스)
+│   ├── extractor.py     # BaseExtractor, Observation (deprecated)
+│   ├── fusion.py        # BaseFusion, FusionResult (deprecated)
 │   ├── isolation.py     # IsolationLevel
 │   └── path.py          # Path utilities
 ├── flow/
 │   ├── node.py          # FlowNode ABC (spec 프로퍼티 포함)
-│   ├── specs.py         # NodeSpec frozen dataclasses (17종)
+│   ├── specs.py         # NodeSpec frozen dataclasses (18종)
+│   ├── interpreter.py   # SimpleInterpreter (spec 기반 실행)
 │   ├── graph.py         # FlowGraph DAG
-│   ├── executor.py      # GraphExecutor (process() 기반 실행)
+│   ├── executor.py      # GraphExecutor (interpreter 위임)
 │   ├── builder.py       # FlowGraphBuilder (fluent API)
 │   └── nodes/
 │       ├── source.py    # SourceNode → SourceSpec
-│       ├── path.py      # PathNode → ExtractSpec
+│       ├── path.py      # PathNode → ModuleSpec / ExtractSpec
 │       ├── filter.py    # FilterNode 등 → FilterSpec 등
 │       ├── sampler.py   # SamplerNode 등 → SampleSpec 등
 │       ├── branch.py    # BranchNode 등 → BranchSpec 등
@@ -92,6 +96,62 @@ visualpath/
 ```
 
 ## 사용 예시
+
+### 통합 Module API (권장)
+
+```python
+from visualpath.core import Module, Observation, FusionResult
+from visualpath.flow import FlowGraphBuilder, GraphExecutor
+
+# Analyzer 모듈: Observation 반환
+class FaceDetector(Module):
+    depends = []  # 의존성 없음
+
+    @property
+    def name(self) -> str:
+        return "face_detect"
+
+    def process(self, frame, deps=None) -> Observation:
+        faces = self._detect(frame.data)
+        return Observation(
+            source=self.name,
+            frame_id=frame.frame_id,
+            t_ns=frame.t_src_ns,
+            signals={"face_count": len(faces)},
+        )
+
+# Trigger 모듈: FusionResult 반환
+class SmileTrigger(Module):
+    depends = ["face_detect"]  # face_detect 의존
+
+    @property
+    def name(self) -> str:
+        return "smile_trigger"
+
+    @property
+    def is_trigger(self) -> bool:
+        return True
+
+    def process(self, frame, deps=None) -> FusionResult:
+        face_obs = deps.get("face_detect") if deps else None
+        if not face_obs or face_obs.signals.get("face_count", 0) == 0:
+            return FusionResult(should_trigger=False)
+        return FusionResult(should_trigger=True, score=0.9)
+
+# FlowGraph 빌드
+graph = (FlowGraphBuilder()
+    .source("frames")
+    .path("analysis", modules=[FaceDetector(), SmileTrigger()])
+    .on_trigger(lambda data: print(f"Trigger: {data}"))
+    .build())
+
+# 실행
+with GraphExecutor(graph) as executor:
+    for frame in video:
+        executor.process(frame)
+```
+
+### Legacy API (하위 호환)
 
 ```python
 from visualpath.core import BaseExtractor, Observation, BaseFusion
@@ -261,65 +321,57 @@ converter가 깨지는 구조적 문제.
 
 ---
 
-### 미해결 과제: Extractor/Fusion 통합
+### Module 통합 완료 (2026-02-05)
 
-#### 현재 상태 (구조적 불일치)
+#### 구현 내용
 
-spec 레이어에서는 extractor와 fusion이 이미 통합되어 있음:
-- `ExtractSpec`이 extractors + fusion을 하나의 노드로 표현
-- FlowGraph 안에서 fusion은 "extraction 이후의 후처리 단계"에 불과
-- face_detection → face_expression 의존성 체인과 본질적으로 동일
-
-그러나 **탑레벨 API는 여전히 둘을 분리**하고 있음:
-
-```
-분리된 곳                      통합된 곳
-──────────                    ──────────
-core/extractor.py             flow/specs.py (ExtractSpec)
-core/fusion.py                flow/nodes/path.py (PathNode)
-api.py (@extractor, @fusion)  converter.py (spec dispatch)
-runner.py (extractors=, fusion=)
-__init__.py (BaseExtractor, BaseFusion)
-plugin/discovery.py (discover_extractors, discover_fusions)
-```
-
-#### 왜 통합이 가능한가
-
-| Extractor | Fusion | 공통점 |
-|-----------|--------|--------|
-| Frame → Observation | Observation → FusionResult | 입력 → 출력 변환 |
-| `depends: List[str]` | `sources: List[str]` | 상위 의존성 선언 |
-| `initialize()` / `cleanup()` | (없지만 필요할 수 있음) | 라이프사이클 |
-| stateless (프레임 단위) | stateful (cooldown, gate) | 차이점 |
-
-핵심 차이는 **statefulness**뿐. fusion은 cooldown, gate, 시간 윈도우 등
-상태를 유지하지만, 이는 extractor도 가질 수 있는 속성임 (예: 트래킹 기반 extractor).
-
-#### 통합 방향 (향후 작업)
-
-spec 기반으로 보면 "분석 모듈"은 하나의 추상화로 충분:
+`Module` ABC를 통해 Extractor와 Fusion을 통합하는 작업 완료:
 
 ```python
-# 현재: 두 개의 ABC
-class BaseExtractor(ABC):  # Frame → Observation
-class BaseFusion(ABC):     # Observation → FusionResult
+# 통합된 Module 인터페이스
+class Module(ABC):
+    depends: List[str] = []  # 의존성 선언
 
-# 향후: 통합 가능성
-# 1. 탑레벨 API 통합
-#    vp.run("video.mp4", pipeline=["face", "smile_fusion"])
-#    (extractors/fusion 파라미터 분리 제거)
-#
-# 2. 레지스트리 통합
-#    단일 _module_registry로 extractor/fusion 구분 없이 등록
-#
-# 3. core ABC 통합 여부는 별도 검토
-#    BaseFusion의 stateful 인터페이스(cooldown, gate)를
-#    BaseExtractor에 흡수할지, 별도 mixin으로 둘지
+    @property
+    @abstractmethod
+    def name(self) -> str: ...
+
+    @abstractmethod
+    def process(self, frame, deps=None) -> ModuleOutput:
+        # ModuleOutput = Union[Observation, FusionResult, None]
+        ...
+
+    @property
+    def is_trigger(self) -> bool:
+        return False  # True면 trigger 모듈
+
+    def initialize(self) -> None: pass
+    def cleanup(self) -> None: pass
+    def reset(self) -> None: pass
 ```
 
-**이 작업은 별도 세션에서 진행.**
-현재 spec 레이어가 이미 통합 구조이므로, 탑레벨 API만 맞추면 됨.
-core ABC 변경은 하위 호환성 영향이 크므로 신중하게 접근.
+#### 모듈 역할 결정
+
+반환 타입으로 역할이 결정됨:
+- `Observation` 반환 → Analyzer 모듈 (분석)
+- `FusionResult` 반환 → Trigger 모듈 (결정)
+
+#### API 통합 현황
+
+| 컴포넌트 | 상태 | 설명 |
+|----------|------|------|
+| `core.Module` | ✅ 완료 | 통합 ABC |
+| `flow.ModuleSpec` | ✅ 완료 | 통합 스펙 |
+| `PathNode(modules=[...])` | ✅ 완료 | 통합 API |
+| `FlowGraphBuilder.path(modules=[...])` | ✅ 완료 | 통합 빌더 API |
+| `SimpleInterpreter` | ✅ 완료 | ModuleSpec 해석 |
+| Legacy API (extractors/fusion) | ✅ 유지 | 하위 호환 |
+
+#### 하위 호환성
+
+기존 `BaseExtractor`, `BaseFusion` API는 deprecated로 유지:
+- `PathNode(extractors=[...], fusion=...)` → `ExtractSpec` 반환
+- `PathNode(modules=[...])` → `ModuleSpec` 반환
 
 ---
 
