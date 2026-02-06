@@ -10,11 +10,18 @@ backends fall back to calling ``process()`` directly.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, Tuple, Union, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from visualpath.core.module import Module
     from visualpath.flow.node import FlowData, Condition
+
+# Type aliases for callable fields in specs.
+ConditionFn = Callable[..., bool]  # (FlowData) -> bool
+FusionFn = Callable[..., Any]  # (FlowData) -> FlowData
+ProcessorFn = Callable[..., Any]  # (FlowData) -> List[FlowData]
+BranchEntry = Tuple[ConditionFn, str]  # (condition, path_id)
+ConditionalPath = Tuple[str, ConditionFn]  # (path_id, condition)
 
 
 @dataclass(frozen=True)
@@ -103,7 +110,7 @@ class FilterSpec(NodeSpec):
         condition: Condition function for filtering.
     """
 
-    condition: Any = None  # Callable[[FlowData], bool]
+    condition: Optional[ConditionFn] = None
 
 
 @dataclass(frozen=True)
@@ -175,7 +182,7 @@ class BranchSpec(NodeSpec):
         if_false: path_id when condition is False.
     """
 
-    condition: Any = None  # Callable[[FlowData], bool]
+    condition: Optional[ConditionFn] = None
     if_true: str = ""
     if_false: str = ""
 
@@ -200,7 +207,7 @@ class MultiBranchSpec(NodeSpec):
         default: Default path_id if no condition matches.
     """
 
-    branches: tuple = ()
+    branches: Tuple[BranchEntry, ...] = ()
     default: Optional[str] = None
 
 
@@ -212,7 +219,7 @@ class ConditionalFanOutSpec(NodeSpec):
         paths: List of (path_id, condition) tuples.
     """
 
-    paths: tuple = ()
+    paths: Tuple[ConditionalPath, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -246,7 +253,7 @@ class CascadeFusionSpec(NodeSpec):
         fusion_fn: Fusion function.
     """
 
-    fusion_fn: Any = None  # Callable[[FlowData], FlowData]
+    fusion_fn: Optional[FusionFn] = None
 
 
 @dataclass(frozen=True)
@@ -274,12 +281,19 @@ class CustomSpec(NodeSpec):
         output_type: Description of expected output type.
     """
 
-    processor: Any = None
+    processor: Optional[ProcessorFn] = None
     input_type: str = ""
     output_type: str = ""
 
 
 __all__ = [
+    # Type aliases
+    "ConditionFn",
+    "FusionFn",
+    "ProcessorFn",
+    "BranchEntry",
+    "ConditionalPath",
+    # Spec classes
     "NodeSpec",
     "SourceSpec",
     "ModuleSpec",

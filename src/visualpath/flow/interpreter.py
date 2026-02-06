@@ -697,7 +697,14 @@ class SimpleInterpreter:
     def _interpret_join(
         self, node_name: str, spec: JoinSpec, data: FlowData
     ) -> List[FlowData]:
-        """Join: buffer data from multiple paths, emit when complete."""
+        """Join: buffer data from multiple paths, emit when complete.
+
+        Temporal semantics (when window_ns > 0):
+        - Data from different paths is only joined if their timestamps
+          are within ``window_ns`` of each other.
+        - When ``lateness_ns > 0``, buffered data older than
+          ``lateness_ns`` relative to the newest arrival is evicted.
+        """
         state = self._state[node_name]
 
         # Unknown path → pass through
@@ -710,6 +717,27 @@ class SimpleInterpreter:
         self._emit_state_change(
             node_name, f"buffers[{data.path_id}]", "buffered", "JoinSpec"
         )
+
+        # Evict stale data beyond lateness_ns
+        if spec.lateness_ns > 0 and len(buffers) > 1:
+            newest_ts = max(d.timestamp_ns for d in buffers.values())
+            stale_paths = [
+                pid for pid, d in buffers.items()
+                if (newest_ts - d.timestamp_ns) > spec.lateness_ns
+            ]
+            for pid in stale_paths:
+                del buffers[pid]
+                self._emit_state_change(
+                    node_name, f"buffers[{pid}]", "evicted (late)", "JoinSpec"
+                )
+
+        # Check temporal alignment (window_ns)
+        if spec.window_ns > 0 and len(buffers) > 1:
+            timestamps = [d.timestamp_ns for d in buffers.values()]
+            spread = max(timestamps) - min(timestamps)
+            if spread > spec.window_ns:
+                # Timestamps too far apart — don't join yet
+                return []
 
         # Check emit condition
         if spec.mode == "any":
