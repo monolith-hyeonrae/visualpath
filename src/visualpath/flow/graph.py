@@ -229,6 +229,7 @@ class FlowGraph:
         - Entry node is set and exists
         - No cycles (DAG property)
         - All nodes are reachable from entry
+        - Module dependencies are satisfiable (within-node or upstream)
 
         Raises:
             ValueError: If validation fails.
@@ -244,6 +245,9 @@ class FlowGraph:
 
         # Check reachability
         self._check_reachability()
+
+        # Check module dependency satisfaction
+        self._check_module_dependencies()
 
     def _check_cycles(self) -> None:
         """Check for cycles using DFS with color marking."""
@@ -283,6 +287,75 @@ class FlowGraph:
         unreachable = set(self._nodes.keys()) - visited
         if unreachable:
             raise ValueError(f"Unreachable nodes from entry: {unreachable}")
+
+    def _check_module_dependencies(self) -> None:
+        """Check that module dependencies are satisfiable.
+
+        For each node containing modules (ModuleSpec or ExtractSpec),
+        verify that every module's declared ``depends`` list is satisfiable
+        by modules within the same node or modules in upstream nodes.
+        """
+        from visualpath.flow.specs import ModuleSpec, ExtractSpec
+
+        self._rebuild_adjacency()
+
+        # Collect module names provided by each node
+        node_provides: Dict[str, Set[str]] = {}
+        for name, node in self._nodes.items():
+            spec = node.spec
+            provided: Set[str] = set()
+            modules: tuple = ()
+            if isinstance(spec, ModuleSpec):
+                modules = spec.modules
+            elif isinstance(spec, ExtractSpec):
+                modules = spec.get_modules()
+            for mod in modules:
+                if hasattr(mod, "name"):
+                    provided.add(mod.name)
+            node_provides[name] = provided
+
+        # For each node in topological order, compute cumulative set
+        # of available module names (from self + all ancestors)
+        try:
+            topo = self.topological_order()
+        except ValueError:
+            # Graph has cycles — already caught by _check_cycles
+            return
+
+        available_at: Dict[str, Set[str]] = {}
+        for name in topo:
+            own = node_provides.get(name, set())
+            from_ancestors: Set[str] = set()
+            for edge in self.get_incoming_edges(name):
+                ancestor_available = available_at.get(edge.source, set())
+                from_ancestors |= ancestor_available
+            available_at[name] = own | from_ancestors
+
+        # Validate: each module's depends must be in available set
+        unsatisfied: List[str] = []
+        for name, node in self._nodes.items():
+            spec = node.spec
+            modules: tuple = ()
+            if isinstance(spec, ModuleSpec):
+                modules = spec.modules
+            elif isinstance(spec, ExtractSpec):
+                modules = spec.get_modules()
+
+            available = available_at.get(name, set())
+            for mod in modules:
+                if not hasattr(mod, "depends") or not mod.depends:
+                    continue
+                for dep_name in mod.depends:
+                    if dep_name not in available:
+                        unsatisfied.append(
+                            f"Module '{mod.name}' in node '{name}' "
+                            f"depends on '{dep_name}', but no upstream node provides it"
+                        )
+
+        if unsatisfied:
+            raise ValueError(
+                "Unsatisfied module dependencies:\n  " + "\n  ".join(unsatisfied)
+            )
 
     def topological_order(self) -> List[str]:
         """Get nodes in topological order.

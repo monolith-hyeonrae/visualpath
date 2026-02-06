@@ -143,7 +143,7 @@ class TestObservationSerialization:
 
     def test_serialize_observation_basic(self):
         """Test observation serialization."""
-        from visualpath.process.worker import _serialize_observation
+        from visualpath.process.serialization import serialize_observation as _serialize_observation
 
         obs = Observation(
             source="test",
@@ -167,13 +167,13 @@ class TestObservationSerialization:
 
     def test_serialize_observation_none(self):
         """Test serialization of None observation."""
-        from visualpath.process.worker import _serialize_observation
+        from visualpath.process.serialization import serialize_observation as _serialize_observation
 
         assert _serialize_observation(None) is None
 
     def test_serialize_observation_non_serializable_data(self):
         """Test serialization with non-JSON-serializable data."""
-        from visualpath.process.worker import _serialize_observation
+        from visualpath.process.serialization import serialize_observation as _serialize_observation
 
         class CustomObject:
             def __repr__(self):
@@ -542,18 +542,22 @@ class TestWorkerModule:
     """Tests for the worker subprocess module."""
 
     def test_json_serializable_check(self):
-        """Test _is_json_serializable function."""
-        from visualpath.process.worker import _is_json_serializable
+        """Test serialize_value handles JSON-serializable and non-serializable values."""
+        import json
+        from visualpath.process.serialization import serialize_value
 
-        assert _is_json_serializable({"key": "value"}) is True
-        assert _is_json_serializable([1, 2, 3]) is True
-        assert _is_json_serializable("string") is True
-        assert _is_json_serializable(123) is True
-        assert _is_json_serializable(None) is True
+        # JSON-serializable values pass through unchanged
+        assert serialize_value({"key": "value"}) == {"key": "value"}
+        assert serialize_value([1, 2, 3]) == [1, 2, 3]
+        assert serialize_value("string") == "string"
+        assert serialize_value(123) == 123
+        assert serialize_value(None) is None
 
-        # Non-serializable
-        assert _is_json_serializable(lambda x: x) is False
-        assert _is_json_serializable(object()) is False
+        # Non-serializable values get converted
+        result = serialize_value(lambda x: x)
+        assert isinstance(result, str)  # Falls back to str()
+        result = serialize_value(object())
+        assert isinstance(result, str)  # Falls back to repr()
 
     def test_argparse_help(self):
         """Test that the worker module has proper argparse setup."""

@@ -13,7 +13,6 @@ Or via the entry point:
 
 import argparse
 import base64
-import json
 import logging
 import sys
 import traceback
@@ -21,89 +20,12 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from visualpath.process.serialization import (
+    serialize_observation,
+    deserialize_observation,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _is_json_serializable(obj: Any) -> bool:
-    """Check if object is JSON serializable."""
-    try:
-        json.dumps(obj)
-        return True
-    except (TypeError, ValueError):
-        return False
-
-
-def _serialize_value(value: Any) -> Any:
-    """Recursively serialize a value for JSON transmission.
-
-    Args:
-        value: Any value to serialize.
-
-    Returns:
-        JSON-serializable representation.
-    """
-    if value is None:
-        return None
-
-    if _is_json_serializable(value):
-        return value
-
-    # Handle dataclasses
-    if hasattr(value, "__dataclass_fields__"):
-        return {
-            k: _serialize_value(getattr(value, k))
-            for k in value.__dataclass_fields__
-        }
-
-    # Handle lists/tuples
-    if isinstance(value, (list, tuple)):
-        return [_serialize_value(item) for item in value]
-
-    # Handle dicts
-    if isinstance(value, dict):
-        return {k: _serialize_value(v) for k, v in value.items()}
-
-    # Handle objects with __dict__
-    if hasattr(value, "__dict__"):
-        return repr(value)
-
-    return str(value)
-
-
-def _serialize_observation(obs: Optional[Any]) -> Optional[Dict[str, Any]]:
-    """Serialize observation for ZMQ transmission.
-
-    Handles both visualpath.core.Observation and custom observation types
-    (e.g., facemoment's Observation with faces instead of data).
-
-    Args:
-        obs: Observation to serialize.
-
-    Returns:
-        JSON-serializable dict, or None if obs is None.
-    """
-    if obs is None:
-        return None
-
-    # Build result from available attributes
-    result = {
-        "source": getattr(obs, "source", "unknown"),
-        "frame_id": getattr(obs, "frame_id", -1),
-        "t_ns": getattr(obs, "t_ns", 0),
-        "signals": getattr(obs, "signals", {}),
-        "metadata": getattr(obs, "metadata", {}),
-        "timing": getattr(obs, "timing", None),
-    }
-
-    # Handle visualpath's 'data' field
-    if hasattr(obs, "data"):
-        result["data"] = _serialize_value(obs.data)
-
-    # Handle facemoment's 'faces' field
-    if hasattr(obs, "faces"):
-        result["faces"] = _serialize_value(obs.faces)
-
-    return result
 
 
 def _deserialize_frame(data: Dict[str, Any]) -> "Frame":
@@ -134,25 +56,8 @@ def _deserialize_frame(data: Dict[str, Any]) -> "Frame":
 
 
 def _deserialize_observation_in_worker(data: Dict[str, Any]) -> "Observation":
-    """Deserialize an Observation from ZMQ deps message.
-
-    Args:
-        data: Dict containing serialized observation data.
-
-    Returns:
-        Reconstructed Observation object.
-    """
-    from visualpath.core.extractor import Observation
-
-    return Observation(
-        source=data["source"],
-        frame_id=data["frame_id"],
-        t_ns=data["t_ns"],
-        signals=data.get("signals", {}),
-        data=data.get("data"),
-        metadata=data.get("metadata", {}),
-        timing=data.get("timing"),
-    )
+    """Deserialize an Observation from ZMQ deps message."""
+    return deserialize_observation(data)
 
 
 def run_worker(extractor_name: str, ipc_address: str) -> int:
@@ -241,7 +146,7 @@ def run_worker(extractor_name: str, ipc_address: str) -> int:
                             observation = extractor.extract(frame)
 
                     socket.send_json({
-                        "observation": _serialize_observation(observation),
+                        "observation": serialize_observation(observation),
                     })
                 except Exception as e:
                     logger.error(f"Extraction error: {e}")

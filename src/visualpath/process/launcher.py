@@ -50,6 +50,10 @@ from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 from visualpath.core.extractor import Observation
 from visualpath.core.module import Module
 from visualpath.core.isolation import IsolationLevel
+from visualpath.process.serialization import (
+    serialize_observation,
+    deserialize_observation,
+)
 
 if TYPE_CHECKING:
     from visualbase import Frame
@@ -300,107 +304,13 @@ def _serialize_frame(frame: "Frame", jpeg_quality: int = 95) -> Dict[str, Any]:
 
 
 def _deserialize_observation(data: Optional[Dict[str, Any]]) -> Optional[Observation]:
-    """Deserialize observation from ZMQ message.
-
-    Returns a visualpath Observation. Domain-specific fields like 'faces'
-    are preserved in the 'data' field for downstream processing.
-
-    Args:
-        data: Dict containing serialized observation data.
-
-    Returns:
-        Reconstructed Observation object, or None.
-    """
-    if data is None:
-        return None
-
-    # Collect domain-specific data (faces, etc.) into the data field
-    extra_data = data.get("data")
-    if "faces" in data:
-        # For facemoment observations, put faces in data
-        if extra_data is None:
-            extra_data = {"faces": data["faces"]}
-        elif isinstance(extra_data, dict):
-            extra_data["faces"] = data["faces"]
-        else:
-            extra_data = {"original": extra_data, "faces": data["faces"]}
-
-    return Observation(
-        source=data["source"],
-        frame_id=data["frame_id"],
-        t_ns=data["t_ns"],
-        signals=data.get("signals", {}),
-        data=extra_data,
-        metadata=data.get("metadata", {}),
-        timing=data.get("timing"),
-    )
-
-
-def _serialize_value_safe(value: Any) -> Any:
-    """Recursively serialize a value for JSON transmission.
-
-    Args:
-        value: Any value to serialize.
-
-    Returns:
-        JSON-serializable representation.
-    """
-    import json
-
-    if value is None:
-        return None
-
-    try:
-        json.dumps(value)
-        return value
-    except (TypeError, ValueError):
-        pass
-
-    # Handle dataclasses
-    if hasattr(value, "__dataclass_fields__"):
-        return {
-            k: _serialize_value_safe(getattr(value, k))
-            for k in value.__dataclass_fields__
-        }
-
-    # Handle lists/tuples
-    if isinstance(value, (list, tuple)):
-        return [_serialize_value_safe(item) for item in value]
-
-    # Handle dicts
-    if isinstance(value, dict):
-        return {k: _serialize_value_safe(v) for k, v in value.items()}
-
-    # Handle objects with __dict__
-    if hasattr(value, "__dict__"):
-        return repr(value)
-
-    return str(value)
+    """Deserialize observation from ZMQ message."""
+    return deserialize_observation(data)
 
 
 def _serialize_observation_for_deps(obs: Optional[Observation]) -> Optional[Dict[str, Any]]:
-    """Serialize an Observation for deps transmission via ZMQ.
-
-    Args:
-        obs: Observation to serialize.
-
-    Returns:
-        JSON-serializable dict, or None.
-    """
-    if obs is None:
-        return None
-
-    result: Dict[str, Any] = {
-        "source": obs.source,
-        "frame_id": obs.frame_id,
-        "t_ns": obs.t_ns,
-        "signals": obs.signals,
-        "metadata": obs.metadata,
-        "timing": obs.timing,
-    }
-    if obs.data is not None:
-        result["data"] = _serialize_value_safe(obs.data)
-    return result
+    """Serialize an Observation for deps transmission via ZMQ."""
+    return serialize_observation(obs)
 
 
 class VenvWorker(BaseWorker):
