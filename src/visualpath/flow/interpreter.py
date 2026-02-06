@@ -24,11 +24,14 @@ Debug hooks:
     >>> interpreter = SimpleInterpreter(debug_hook=on_interpret)
 """
 
+import logging
 import operator
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
 
 from visualpath.flow.node import FlowData, FlowNode
 from visualpath.flow.specs import (
@@ -113,6 +116,27 @@ class DebugEvent:
 DebugHook = Callable[[DebugEvent], None]
 
 
+class NodeProcessingError(Exception):
+    """Raised when a user-provided callable within a node fails.
+
+    Wraps the original exception with context about which node and
+    spec type caused the error, enabling better diagnostics.
+
+    Attributes:
+        node_name: Name of the node where the error occurred.
+        spec_type: Type name of the spec being interpreted.
+        original_error: The underlying exception.
+    """
+
+    def __init__(self, node_name: str, spec_type: str, original_error: Exception):
+        self.node_name = node_name
+        self.spec_type = spec_type
+        self.original_error = original_error
+        super().__init__(
+            f"Error in node '{node_name}' ({spec_type}): {original_error}"
+        )
+
+
 class SimpleInterpreter:
     """Spec-based interpreter for synchronous execution.
 
@@ -121,6 +145,13 @@ class SimpleInterpreter:
 
     This interpreter is used by SimpleBackend and GraphExecutor for
     sequential/local execution of flow graphs.
+
+    Error handling:
+        When ``on_error="raise"`` (default), errors from user-provided
+        callables (conditions, fusion_fn, processors) are wrapped in
+        :class:`NodeProcessingError` and re-raised.
+        When ``on_error="drop"``, errors are logged and the data is
+        dropped (empty output).
 
     Debug hooks:
         Pass a debug_hook callback to observe internal operations:
@@ -138,11 +169,16 @@ class SimpleInterpreter:
         self,
         debug: bool = False,
         debug_hook: Optional[DebugHook] = None,
+        on_error: str = "raise",
     ) -> None:
         # Per-node mutable state, keyed by node name
         self._state: Dict[str, Dict[str, Any]] = defaultdict(dict)
         self._debug = debug
         self._debug_hook = debug_hook
+        if on_error not in ("raise", "drop"):
+            raise ValueError(f"on_error must be 'raise' or 'drop', got '{on_error}'")
+        self._on_error = on_error
+        self._current_node: str = ""  # Set during interpret()
 
     def _emit_debug(self, event: DebugEvent) -> None:
         """Emit a debug event to registered hooks."""
@@ -163,6 +199,31 @@ class SimpleInterpreter:
                 state_key=key,
                 state_value=value,
             ))
+
+    def _handle_error(
+        self, spec_type: str, error: Exception
+    ) -> List[FlowData]:
+        """Handle an error from a user-provided callable.
+
+        Uses self._current_node for the actual graph node name.
+        If on_error="drop", logs the error and returns empty list.
+        If on_error="raise", wraps and re-raises as NodeProcessingError.
+        """
+        node_name = self._current_node
+        if self._on_error == "drop":
+            logger.error(
+                "Error in node '%s' (%s): %s — data dropped",
+                node_name, spec_type, error,
+            )
+            if self._debug or self._debug_hook is not None:
+                self._emit_debug(DebugEvent(
+                    phase="error",
+                    node=node_name,
+                    spec_type=spec_type,
+                    extra={"error": str(error), "error_type": type(error).__name__},
+                ))
+            return []
+        raise NodeProcessingError(node_name, spec_type, error) from error
 
     def reset(self) -> None:
         """Clear all interpreter state."""
@@ -187,6 +248,7 @@ class SimpleInterpreter:
         """
         spec = node.spec
         spec_type = type(spec).__name__
+        self._current_node = node.name
         has_debug = self._debug or self._debug_hook is not None
 
         # Emit enter event
@@ -495,8 +557,11 @@ class SimpleInterpreter:
         self, spec: FilterSpec, data: FlowData
     ) -> List[FlowData]:
         """Pass data if condition is true, drop otherwise."""
-        if spec.condition(data):
-            return [data]
+        try:
+            if spec.condition(data):
+                return [data]
+        except Exception as e:
+            return self._handle_error("FilterSpec", e)
         return []
 
     def _interpret_observation_filter(
@@ -585,9 +650,12 @@ class SimpleInterpreter:
         self, spec: BranchSpec, data: FlowData
     ) -> List[FlowData]:
         """Binary branch: route to if_true or if_false path."""
-        if spec.condition(data):
-            return [data.with_path(spec.if_true)]
-        return [data.with_path(spec.if_false)]
+        try:
+            if spec.condition(data):
+                return [data.with_path(spec.if_true)]
+            return [data.with_path(spec.if_false)]
+        except Exception as e:
+            return self._handle_error("BranchSpec", e)
 
     def _interpret_fanout(
         self, spec: FanOutSpec, data: FlowData
@@ -599,9 +667,12 @@ class SimpleInterpreter:
         self, spec: MultiBranchSpec, data: FlowData
     ) -> List[FlowData]:
         """Multi-way branch: route to first matching condition."""
-        for condition, path_id in spec.branches:
-            if condition(data):
-                return [data.with_path(path_id)]
+        try:
+            for condition, path_id in spec.branches:
+                if condition(data):
+                    return [data.with_path(path_id)]
+        except Exception as e:
+            return self._handle_error("MultiBranchSpec", e)
         if spec.default is not None:
             return [data.with_path(spec.default)]
         return []
@@ -611,9 +682,12 @@ class SimpleInterpreter:
     ) -> List[FlowData]:
         """Conditional fan-out: clone for each passing condition."""
         results = []
-        for path_id, condition in spec.paths:
-            if condition(data):
-                results.append(data.clone(path_id=path_id))
+        try:
+            for path_id, condition in spec.paths:
+                if condition(data):
+                    results.append(data.clone(path_id=path_id))
+        except Exception as e:
+            return self._handle_error("ConditionalFanOutSpec", e)
         return results
 
     # -----------------------------------------------------------------
@@ -694,7 +768,10 @@ class SimpleInterpreter:
         self, spec: CascadeFusionSpec, data: FlowData
     ) -> List[FlowData]:
         """Apply cascade fusion function to data."""
-        result = spec.fusion_fn(data)
+        try:
+            result = spec.fusion_fn(data)
+        except Exception as e:
+            return self._handle_error("CascadeFusionSpec", e)
         return [result]
 
     # -----------------------------------------------------------------
@@ -752,5 +829,21 @@ class SimpleInterpreter:
             return self._emit_collector(node_name, spec)
         return []
 
+    # -----------------------------------------------------------------
+    # Custom
+    # -----------------------------------------------------------------
 
-__all__ = ["SimpleInterpreter", "DebugEvent", "DebugHook"]
+    def _interpret_custom(
+        self, spec: CustomSpec, data: FlowData
+    ) -> List[FlowData]:
+        """Execute a user-provided custom processor."""
+        try:
+            result = spec.processor(data)
+        except Exception as e:
+            return self._handle_error("CustomSpec", e)
+        if isinstance(result, list):
+            return result
+        return [result]
+
+
+__all__ = ["SimpleInterpreter", "NodeProcessingError", "DebugEvent", "DebugHook"]
